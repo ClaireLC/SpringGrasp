@@ -11,6 +11,8 @@ import os
 from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOptimizer
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
 
+import viz_utils as v_utils
+
 device = torch.device("cpu")
 
 def vis_grasp(tip_pose, target_pose):
@@ -51,9 +53,9 @@ if __name__ == "__main__":
     parser.add_argument("--mass", type=float, default=0.5) # Not use in the paper, may run into numerical issues.
     parser.add_argument("--friction", type=float, default=1.0)
     parser.add_argument("--vis_gpis", action="store_true", default=False)
-    parser.add_argument("--fast_exp", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
     parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
+    parser.add_argument("--vis", choices=["pb", "o3d"], default="o3d", help="Visualize mode. If not specified, do not show vis.")
     args = parser.parse_args()
 
     if args.weight_config is not None:
@@ -215,6 +217,7 @@ if __name__ == "__main__":
         else:
             continue
     print("Feasible indices:",idx_list, "Feasible rate:", len(idx_list)/opt_tip_pose.shape[0])
+    print("Optimal compliance:", opt_compliance)
 
     # Save grasps
     if args.exp_name is not None:
@@ -241,18 +244,25 @@ if __name__ == "__main__":
         print("Saving predictions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
 
-    # Visualize grasp in pybullet
-    pcd.colors = o3d.utility.Vector3dVector(np.array([0.0, 0.0, 1.0] * len(pcd.points)).reshape(-1,3))
-    grasp_vis = GraspVisualizer(robot_urdf, pcd)
-    # After transformation
-    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
-    floor = o3d.geometry.TriangleMesh.create_box(width=0.5, height=0.5, depth=0.01).translate([-0.25,-0.25,-0.01])
-    print("Optimal compliance:", opt_compliance)
-    for i in idx_list:
-        if args.fast_exp:
-            continue
-        tips, targets, arrows = vis_grasp(opt_tip_pose[i], opt_target_pose[i])
-        grasp_vis.visualize_grasp(joint_angles=opt_joint_angles[i].detach().cpu().numpy(), 
-                                    wrist_pose=opt_palm_pose[i].detach().cpu().numpy(), 
-                                    target_pose=opt_target_pose[i].detach().cpu().numpy())
-        o3d.visualization.draw_geometries([pcd, *tips, *targets, *arrows])
+    if args.vis is not None:
+        if args.vis == "pb":
+            # Visualize grasp in pybullet
+            pcd.colors = o3d.utility.Vector3dVector(np.array([0.0, 0.0, 1.0] * len(pcd.points)).reshape(-1,3))
+            grasp_vis = GraspVisualizer(robot_urdf, pcd)
+            # After transformation
+            coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+            floor = o3d.geometry.TriangleMesh.create_box(width=0.5, height=0.5, depth=0.01).translate([-0.25,-0.25,-0.01])
+            for i in idx_list:
+                tips, targets, arrows = vis_grasp(opt_tip_pose[i], opt_target_pose[i])
+                grasp_vis.visualize_grasp(joint_angles=opt_joint_angles[i].detach().cpu().numpy(), 
+                                            wrist_pose=opt_palm_pose[i].detach().cpu().numpy(), 
+                                            target_pose=opt_target_pose[i].detach().cpu().numpy())
+                o3d.visualization.draw_geometries([pcd, *tips, *targets, *arrows])
+
+        if args.vis == "o3d":
+            for i in idx_list:
+                print("Grasp:", i)
+                v_utils.vis_results(
+                    pcd, opt_tip_pose[i], opt_target_pose[i],
+                    wrist_pose=opt_palm_pose[i].cpu().detach().numpy(),
+                )
