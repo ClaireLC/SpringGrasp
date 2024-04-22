@@ -12,6 +12,7 @@ from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOpt
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
 
 import viz_utils as v_utils
+import get_initial_conditions as init_cond
 
 device = torch.device("cpu")
 
@@ -56,6 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight_config", type=str, default=None)
     parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
     parser.add_argument("--vis", choices=["pb", "o3d"], default="o3d", help="Visualize mode. If not specified, do not show vis.")
+    parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
     args = parser.parse_args()
 
     if args.weight_config is not None:
@@ -65,17 +67,25 @@ if __name__ == "__main__":
 
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file)
+        center = pcd.get_axis_aligned_bounding_box().get_center()
+        WRIST_OFFSET[:,0] += center[0]
+        WRIST_OFFSET[:,1] += center[1]
+        WRIST_OFFSET[:,2] += 2 * center[2]
+        init_wrist_poses = WRIST_OFFSET
     elif args.npz_path is not None:
         input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(input_dict["pts_wf"])
+        #init_wrist_poses = init_cond.get_default_wrist_pose(pcd)
+        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
+        center = pcd.get_axis_aligned_bounding_box().get_center()
     else:
         pcd = o3d.io.read_point_cloud("data/obj_cropped.ply")
-    #center = pcd.get_oriented_bounding_box().get_center()
-    center = pcd.get_axis_aligned_bounding_box().get_center()
-    WRIST_OFFSET[:,0] += center[0]
-    WRIST_OFFSET[:,1] += center[1]
-    WRIST_OFFSET[:,2] += 2 * center[2]
+        center = pcd.get_axis_aligned_bounding_box().get_center()
+        WRIST_OFFSET[:,0] += center[0]
+        WRIST_OFFSET[:,1] += center[1]
+        WRIST_OFFSET[:,2] += 2 * center[2]
+        init_wrist_poses = WRIST_OFFSET
     
     # GPIS formulation
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
@@ -171,7 +181,7 @@ if __name__ == "__main__":
                                                 optimize_target=True,
                                                 optimize_palm=True, # NOTE: Experimental
                                                 num_iters=args.num_iters,
-                                                palm_offset=WRIST_OFFSET,
+                                                palm_offset=init_wrist_poses,
                                                 uncertainty=20.0,
                                                 # Useless for now
                                                 mass=args.mass, 
@@ -188,21 +198,47 @@ if __name__ == "__main__":
                                                 optimize_target=True,
                                                 optimize_palm=True, # NOTE: Experimental
                                                 num_iters=args.num_iters,
-                                                palm_offset=WRIST_OFFSET,
+                                                palm_offset=init_wrist_poses,
                                                 mass=args.mass, com=center[:3],
                                                 gravity=False,
                                                 weight_config=weight_config)
-    num_guesses = len(WRIST_OFFSET)
+
+    # Get intial conditions
+    num_guesses = len(init_wrist_poses)
+    print("Number of initial guesses:", num_guesses)
     init_joint_angles = init_joint_angles.repeat_interleave(num_guesses,dim=0)
-    #target_pose = target_pose.repeat_interleave(num_guesses,dim=0)
     compliance = compliance.repeat_interleave(num_guesses,dim=0)
-    debug_tip_pose = grasp_optimizer.forward_kinematics(init_joint_angles, torch.from_numpy(WRIST_OFFSET).to(device))
-    target_pose = debug_tip_pose.mean(dim=1, keepdim=True).repeat(1,4,1)
-    target_pose = target_pose + (debug_tip_pose - target_pose) * 0.3
-    if args.vis_gpis:
-        for i in range(debug_tip_pose.shape[0]):
-            tips, targets, arrows = vis_grasp(debug_tip_pose[i], target_pose[i])
-            o3d.visualization.draw_geometries([pcd, *tips, *targets, *arrows])
+    init_start_ftip_pos, target_pose = init_cond.get_start_and_target_ftip_pos(
+        init_wrist_poses, init_joint_angles, grasp_optimizer, device,
+    )
+    # Save initial pose info
+    if args.npz_path is not None:
+        data_dict = {
+            "start_tip_pose": init_start_ftip_pos.cpu().detach().numpy(),
+            "target_tip_pose": target_pose.cpu().detach().numpy(),
+            "palm_pose": init_wrist_poses,
+            "input_pts": np.asarray(pcd.points),
+            "input_path": args.npz_path,
+            "compliance": compliance.cpu().detach().numpy(),
+            "joint_angles": init_joint_angles.cpu().detach().numpy(),
+        }
+        save_path = os.path.join(os.path.dirname(args.npz_path), "sg_init_cond.npz")
+        print("Saving initial conditions to:", save_path)
+        np.savez_compressed(save_path, data=data_dict)
+    if args.vis_ic:
+        for i in range(num_guesses):
+            print("Initial condition:", i)
+            v_utils.vis_results(
+                pcd,
+                init_start_ftip_pos[i],
+                target_pose[i],
+                wrist_pose=init_wrist_poses[i],
+                draw_frame=True,
+                #wrist_frame="original",
+            )
+        quit()
+
+    # Run optimization
     if args.mode == "sp":
         opt_joint_angles, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_R, opt_t = grasp_optimizer.optimize(init_joint_angles,target_pose, compliance, friction_mu, gpis, verbose=True)
         opt_tip_pose = grasp_optimizer.forward_kinematics(opt_joint_angles, opt_palm_pose)
