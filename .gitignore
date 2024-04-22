@@ -30,4 +30,5 @@ outputs/
 *.npy
 *.npz
 *.pyc
+*.ply
 __pycache__/
