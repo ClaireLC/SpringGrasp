@@ -26,21 +26,21 @@ if torch_spec is None:
     )
 else:
     import torch
-    torch_ver = parse_version(torch.__version__)
-    if (torch_ver < parse_version(TORCH_MIN_VER) or
-        torch_ver > parse_version(TORCH_MAX_VER)):
-        if IGNORE_TORCH_VER:
-            warnings.warn(
-                f'Kaolin is compatible with PyTorch >={TORCH_MIN_VER}, <={TORCH_MAX_VER}, '
-                f'but found version {torch.__version__}. Continuing with the installed '
-                'version as IGNORE_TORCH_VER is set.'
-            )
-        else:
-            raise ImportError(
-                f'Kaolin requires PyTorch >={TORCH_MIN_VER}, <={TORCH_MAX_VER}, '
-                f'but found version {torch.__version__} instead.'
-                'If you wish to install with this specific version set IGNORE_TORCH_VER=1.'
-            )
+    #torch_ver = parse_version(torch.__version__)
+    #if (torch_ver < parse_version(TORCH_MIN_VER) or
+    #    torch_ver > parse_version(TORCH_MAX_VER)):
+    #    if IGNORE_TORCH_VER:
+    #        warnings.warn(
+    #            f'Kaolin is compatible with PyTorch >={TORCH_MIN_VER}, <={TORCH_MAX_VER}, '
+    #            f'but found version {torch.__version__}. Continuing with the installed '
+    #            'version as IGNORE_TORCH_VER is set.'
+    #        )
+    #    else:
+    #        raise ImportError(
+    #            f'Kaolin requires PyTorch >={TORCH_MIN_VER}, <={TORCH_MAX_VER}, '
+    #            f'but found version {torch.__version__} instead.'
+    #            'If you wish to install with this specific version set IGNORE_TORCH_VER=1.'
+    #        )
 
 import os
 import sys
