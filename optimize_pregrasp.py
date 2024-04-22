@@ -6,6 +6,7 @@ import torch
 from utils import robot_configs
 from utils.pb_grasp_visualizer import GraspVisualizer
 from utils.create_arrow import create_direct_arrow
+import os
 
 from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOptimizer
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
@@ -43,7 +44,7 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser.add_argument("--num_iters", type=int, default=200)
-    parser.add_argument("--exp_name", type=str, required=True)
+    parser.add_argument("--exp_name", type=str)
     parser.add_argument("--pcd_file", type=str, default=None)
     parser.add_argument("--mode", type=str, default="sp") # fc
     parser.add_argument("--hand", type=str, default="allegro_right", choices=["allegro", "allegro_right", "leap"])
@@ -52,6 +53,7 @@ if __name__ == "__main__":
     parser.add_argument("--vis_gpis", action="store_true", default=False)
     parser.add_argument("--fast_exp", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
+    parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
     args = parser.parse_args()
 
     if args.weight_config is not None:
@@ -61,6 +63,10 @@ if __name__ == "__main__":
 
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file)
+    elif args.npz_path is not None:
+        input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(input_dict["pts_wf"])
     else:
         pcd = o3d.io.read_point_cloud("data/obj_cropped.ply")
     #center = pcd.get_oriented_bounding_box().get_center()
@@ -117,8 +123,26 @@ if __name__ == "__main__":
         colors[:,2] = 1 - vis_var
         fitted_pcd.colors = o3d.utility.Vector3dVector(colors)
         o3d.visualization.draw_geometries([fitted_pcd])
-        np.savez(f"gpis_states/{args.exp_name}_gpis.npz", mean=test_mean, var=test_var, normal=test_normal, ub=ub, lb=lb)
-    
+
+        if args.exp_name is not None:
+            np.savez(f"gpis_states/{args.exp_name}_gpis.npz", mean=test_mean, var=test_var, normal=test_normal, ub=ub, lb=lb)
+        else:
+            gpis_dict = {
+                "mean": test_mean,
+                "var": test_var,
+                "normal": test_normal,
+                "ub": ub,
+                "lb": lb,
+                "bound": bound,
+                "center": center,
+            }
+            save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.npz")
+            print("Saving GPIS results to:", save_path)
+            np.savez_compressed(save_path, data=gpis_dict)
+            save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.ply")
+            print("Saving GPIS viz pcd to:", save_path)
+            o3d.io.write_point_cloud(save_path, fitted_pcd)  
+
     init_tip_pose = torch.tensor([[[0.05,0.05, 0.02],[0.06,-0.0, -0.01],[0.03,-0.04,0.0],[-0.07,-0.01, 0.02]]]).double().to(device)
     init_joint_angles = torch.tensor(robot_configs[args.hand]["ref_q"].tolist()).unsqueeze(0).double().to(device)
     if args.mode == "fc":
@@ -182,24 +206,49 @@ if __name__ == "__main__":
         opt_tip_pose = grasp_optimizer.forward_kinematics(opt_joint_angles, opt_palm_pose)
     elif args.mode == "fc":
         opt_tip_pose, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_joint_angles = grasp_optimizer.optimize(init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True)
-    #print("init joint angles:",init_joint_angles)
-    # Visualize target and tip pose
     
-    pcd.colors = o3d.utility.Vector3dVector(np.array([0.0, 0.0, 1.0] * len(pcd.points)).reshape(-1,3))
-    grasp_vis = GraspVisualizer(robot_urdf, pcd)
-
-    # Visualize grasp in pybullet
-        
-    # After transformation
-    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
-    floor = o3d.geometry.TriangleMesh.create_box(width=0.5, height=0.5, depth=0.01).translate([-0.25,-0.25,-0.01])
+    # Get feasible idx
     idx_list = []
-    print("Optimal compliance:", opt_compliance)
     for i in range(opt_tip_pose.shape[0]):
         if opt_margin[i].min() > 0.0:
             idx_list.append(i)
         else:
             continue
+    print("Feasible indices:",idx_list, "Feasible rate:", len(idx_list)/opt_tip_pose.shape[0])
+
+    # Save grasps
+    if args.exp_name is not None:
+        if len(idx_list) > 0:
+            np.save(f"data/contact_{args.exp_name}.npy", opt_tip_pose.cpu().detach().numpy()[idx_list])
+            np.save(f"data/target_{args.exp_name}.npy", opt_target_pose.cpu().detach().numpy()[idx_list])
+            np.save(f"data/wrist_{args.exp_name}.npy", opt_palm_pose.cpu().detach().numpy()[idx_list])
+            np.save(f"data/compliance_{args.exp_name}.npy", opt_compliance.cpu().detach().numpy()[idx_list])
+            if args.mode == "prob":
+                np.save(f"data/joint_angle_{args.exp_name}.npy", opt_joint_angles.cpu().detach().numpy()[idx_list])
+    else:
+        data_dict = {
+            "feasible_idx": np.array([idx_list]),
+            "start_tip_pose": opt_tip_pose.cpu().detach().numpy(),
+            "target_tip_pose": opt_target_pose.cpu().detach().numpy(),
+            "palm_pose": opt_palm_pose.cpu().detach().numpy(),
+            "compliance": opt_compliance.cpu().detach().numpy(),
+            "input_pts": np.asarray(pcd.points),
+            "opt_t": opt_t.cpu().detach().numpy(),
+            "opt_R": opt_R.cpu().detach().numpy(),
+            "input_path": args.npz_path,
+        }
+        save_path = os.path.join(os.path.dirname(args.npz_path), "sg_predictions.npz")
+        print("Saving predictions to:", save_path)
+        np.savez_compressed(save_path, data=data_dict)
+
+    # Visualize grasp in pybullet
+    pcd.colors = o3d.utility.Vector3dVector(np.array([0.0, 0.0, 1.0] * len(pcd.points)).reshape(-1,3))
+    grasp_vis = GraspVisualizer(robot_urdf, pcd)
+    # After transformation
+    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+    floor = o3d.geometry.TriangleMesh.create_box(width=0.5, height=0.5, depth=0.01).translate([-0.25,-0.25,-0.01])
+    print("Optimal compliance:", opt_compliance)
+    for i in idx_list:
         if args.fast_exp:
             continue
         tips, targets, arrows = vis_grasp(opt_tip_pose[i], opt_target_pose[i])
@@ -207,11 +256,3 @@ if __name__ == "__main__":
                                     wrist_pose=opt_palm_pose[i].detach().cpu().numpy(), 
                                     target_pose=opt_target_pose[i].detach().cpu().numpy())
         o3d.visualization.draw_geometries([pcd, *tips, *targets, *arrows])
-    print("Feasible indices:",idx_list, "Feasible rate:", len(idx_list)/opt_tip_pose.shape[0])
-    if len(idx_list) > 0:
-        np.save(f"data/contact_{args.exp_name}.npy", opt_tip_pose.cpu().detach().numpy()[idx_list])
-        np.save(f"data/target_{args.exp_name}.npy", opt_target_pose.cpu().detach().numpy()[idx_list])
-        np.save(f"data/wrist_{args.exp_name}.npy", opt_palm_pose.cpu().detach().numpy()[idx_list])
-        np.save(f"data/compliance_{args.exp_name}.npy", opt_compliance.cpu().detach().numpy()[idx_list])
-        if args.mode == "prob":
-            np.save(f"data/joint_angle_{args.exp_name}.npy", opt_joint_angles.cpu().detach().numpy()[idx_list])
