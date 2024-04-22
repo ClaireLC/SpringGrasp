@@ -46,7 +46,7 @@ if __name__ == "__main__":
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--pcd_file", type=str, default=None)
     parser.add_argument("--mode", type=str, default="sp") # fc
-    parser.add_argument("--hand", type=str, default="allegro")
+    parser.add_argument("--hand", type=str, default="allegro_right", choices=["allegro", "allegro_right", "leap"])
     parser.add_argument("--mass", type=float, default=0.5) # Not use in the paper, may run into numerical issues.
     parser.add_argument("--friction", type=float, default=1.0)
     parser.add_argument("--vis_gpis", action="store_true", default=False)
@@ -131,6 +131,8 @@ if __name__ == "__main__":
         robot_urdf = "assets/leap_hand/robot.urdf"
     elif args.hand == "allegro": # Used in the paper
         robot_urdf = "assets/allegro_hand/allegro_hand_description_left.urdf"
+    elif args.hand == "allegro_right": # Used in the paper
+        robot_urdf = "assets/allegro_hand/allegro_hand_description_right.urdf"
 
     if args.mode == "fc":
         grasp_optimizer = optimizers[args.mode](robot_urdf,
