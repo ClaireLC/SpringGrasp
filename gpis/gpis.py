@@ -31,6 +31,11 @@ class GPIS:
 
     # noise can also be a vector
     def fit(self, X1, y1, noise=0.0):
+        """
+        X1: external, surface, and internal training points [N, 3]
+        y1: labels for training points (+bound for external, 0 for surface, -bound for internal [N,])
+        noise: vector of onise
+        """
         # Find maximum pair wise distance within training data
         if self.kernel_function == self.thin_plate_spline or self.kernel_function == self.joint_kernel:
             self.R = torch.max(torch.cdist(X1, X1))
@@ -123,37 +128,9 @@ class GPIS:
             test_var[i] = var.view(steps,steps)
 
         return test_mean.cpu().numpy(), test_var.cpu().numpy(), test_normals.cpu().numpy(), np.asarray(lb), np.asarray(ub)
-    
+
     def topcd(self,test_mean, test_normal, lb, ub, test_var=None, steps=100):
-        lb, ub = np.asarray(lb), np.asarray(ub)
-        
-        if torch.is_tensor(test_mean):
-            test_mean = test_mean.cpu().numpy()[:,:,::-1]
-        if torch.is_tensor(test_normal):
-            test_normal = test_normal.cpu().numpy()[:,:,::-1]
-        internal = test_mean < 0.0
-        # find every point in internel that is surrounded by at least one points that is not internal
-        mask = np.zeros_like(internal)
-        for i in range(1,steps-1):
-            for j in range(1,steps-1):
-                for k in range(1,steps-1):
-                    if internal[i,j,k]:
-                        if not internal[i-1,j,k] or not internal[i+1,j,k] or not internal[i,j-1,k] or not internal[i,j+1,k] or not internal[i,j,k-1] or not internal[i,j,k+1]:
-                            mask[i,j,k] = 1
-        # get three index of each masked point
-        all_points = np.stack(np.meshgrid(np.linspace(lb[0],ub[0],steps),
-                                      np.linspace(lb[1],ub[1],steps),
-                                      np.linspace(lb[2],ub[2],steps),indexing="xy"),axis=3)
-        normals = test_normal[mask]
-        # convert index to pointcloud
-        points = all_points[mask]
-        if test_var is not None:
-            var = test_var[mask]
-            return points, normals, var
-        return points, normals
-
-        
-
+        return topcd(test_mean, test_normal, lb, ub, test_var=test_var, steps=steps)
     
     def save_state_data(self, name="gpis_state"):
         R = self.R.cpu().numpy()
@@ -169,6 +146,36 @@ class GPIS:
         self.y1 = torch.from_numpy(data["y1"]).cuda()
         self.E11 = torch.from_numpy(data["E11"]).cuda()
         self.bias = torch.from_numpy(data["bias"]).double().cuda()
+
+def topcd(test_mean, test_normal, lb, ub, test_var=None, steps=100):
+    lb, ub = np.asarray(lb), np.asarray(ub)
+    
+    if torch.is_tensor(test_mean):
+        test_mean = test_mean.cpu().numpy()[:,:,::-1]
+    if torch.is_tensor(test_normal):
+        test_normal = test_normal.cpu().numpy()[:,:,::-1]
+    internal = test_mean < 0.0
+    # find every point in internel that is surrounded by at least one points that is not internal
+    mask = np.zeros_like(internal)
+    for i in range(1,steps-1):
+        for j in range(1,steps-1):
+            for k in range(1,steps-1):
+                if internal[i,j,k]:
+                    if not internal[i-1,j,k] or not internal[i+1,j,k] or not internal[i,j-1,k] or not internal[i,j+1,k] or not internal[i,j,k-1] or not internal[i,j,k+1]:
+                        mask[i,j,k] = 1
+    # get three index of each masked point
+    all_points = np.stack(np.meshgrid(np.linspace(lb[0],ub[0],steps),
+                                  np.linspace(lb[1],ub[1],steps),
+                                  np.linspace(lb[2],ub[2],steps),indexing="xy"),axis=3)
+    normals = test_normal[mask]
+    # convert index to pointcloud
+    points = all_points[mask]
+    if test_var is not None:
+        var = test_var[mask]
+        return points, normals, var
+    return points, normals
+        
+
 
         
 def sample_internel_points(mesh, num_points, temperature=10.0):
@@ -197,90 +204,137 @@ if __name__ == "__main__":
     import open3d as o3d
     import matplotlib.pyplot as plt
     import numpy as np
+    from argparse import ArgumentParser
 
-    # mesh = o3d.geometry.TriangleMesh.create_box(1, 1, 1).translate([-0.5,-0.5,-0.5])
-    # pcd = mesh.sample_points_poisson_disk(64)
-    # points = torch.from_numpy(np.asarray(pcd.points)).cuda().float()
-    mesh = o3d.io.read_triangle_mesh("assets/mug/mug.stl")
-    #decomp_mesh = o3d.io.read_triangle_mesh("assets/banana/banana_decomp.obj")
+    parser = ArgumentParser()
+    parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
+    args = parser.parse_args()
+
+    device = torch.device("cpu")
+
+    # Load mesh from path
+    #mesh = o3d.io.read_triangle_mesh("assets/mug/mug.stl")
     #mesh = mesh.compute_convex_hull()[0]
-    mesh2 = o3d.io.read_triangle_mesh("assets/mug2/mug2.stl")
-    pcd = mesh.sample_points_poisson_disk(64)
+
+    n_point = 200
+    if args.npz_path is not None:
+        input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(input_dict["pts_wf"])
+        pcd = pcd.farthest_point_down_sample(n_point)
+        points = np.asarray(pcd.points)
+    else:
+        # Create point cloud from mesh
+        mesh = o3d.geometry.TriangleMesh.create_box(0.2, 0.2, 0.2)
+        pcd = mesh.sample_points_poisson_disk(n_point)
+
     pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([0,1,0]), (len(pcd.points),1)))
-    pcd2 = mesh2.sample_points_poisson_disk(128)
     o3d.visualization.draw_geometries([pcd])
     points = np.asarray(pcd.points)
     np.random.shuffle(points)
-    points = torch.from_numpy(points).cuda().double()
-    points2 = torch.from_numpy(np.asarray(pcd2.points)).cuda().double()
-    weights = torch.rand(50,64).cuda().double()
-    # normalize dimension 1
-    weights = torch.softmax(weights * 10, dim=1)
+    points = torch.from_numpy(points).to(device).double()
+
+    center = pcd.get_axis_aligned_bounding_box().get_center()
+
+    # Compute internal points
+    weights = torch.rand(50,len(points)).to(device).double()
+    weights = torch.softmax(weights * 100, dim=1) # normalize dimension 1
     print(weights.sum(dim=1))
-    
-    mask = points[:,0] < 0.0
-    mask2 = points2[:,0] < 0.0
-
     internal_points = weights @ points
-    #internal_points = sample_internel_points(decomp_mesh, 20, 100.0).cuda().double()
-    new_pcd = o3d.geometry.PointCloud()
-    new_pcd.points = o3d.utility.Vector3dVector(internal_points.cpu().numpy())
-    new_pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([1,0,0]), (len(internal_points),1)))
+    internal_pcd = o3d.geometry.PointCloud()
+    internal_pcd.points = o3d.utility.Vector3dVector(internal_points.cpu().numpy())
+    internal_pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([1,0,0]), (len(internal_points),1)))
 
-    second_pcd = o3d.geometry.PointCloud()
-    second_pcd.points = o3d.utility.Vector3dVector(points[~mask].cpu().numpy() * np.array([0.7,1,1]))
-    second_pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([0,0,1]), (len(points[~mask]),1)))
+    # External points
+    bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
+    external_points = torch.tensor([
+        [-bound, -bound, -bound], 
+        [bound, -bound, -bound], 
+        [-bound, bound, -bound],
+        [bound, bound, -bound],
+        [-bound, -bound, bound], 
+        [bound, -bound, bound], 
+        [-bound, bound, bound],
+        [bound, bound, bound],
+        [-bound,0., 0.], 
+        [0., -bound, 0.], 
+        [bound, 0., 0.], 
+        [0., bound, 0],
+        [0., 0., bound], 
+        [0., 0., -bound]]
+    ).double().to(device)
+    external_points += torch.from_numpy(center).to(device).double()
+    external_pcd = o3d.geometry.PointCloud()
+    external_pcd.points = o3d.utility.Vector3dVector(external_points.cpu().numpy())
+    external_pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([0,0,1]), (len(external_points),1)))
 
-    o3d.visualization.draw_geometries([pcd, new_pcd, second_pcd])
+    o3d.visualization.draw_geometries([pcd, internal_pcd, external_pcd])
+
     gpis = GPIS(0.08, 1)
-    bound = 0.1
-    externel_points = torch.tensor([[-bound, -bound, -bound], [bound, -bound, -bound], [-bound, bound, -bound],[bound, bound, -bound],
-                                    [-bound, -bound, bound], [bound, -bound, bound], [-bound, bound, bound],[bound, bound, bound],
-                                    [-bound,0., 0.], [0., -bound, 0.], [bound, 0., 0.], [0., bound, 0],
-                                    [0., 0., bound], [0., 0., -bound]]).double().cuda()
     
-    # Create mask for partial observed pointcloud
-    
+    # Training point labels (SDF values)
+    data_noise = [0.005] * len(points)
+    y = torch.vstack([
+        bound * torch.ones_like(external_points[:,0]).to(device).view(-1,1),
+        torch.zeros_like(points[:,0]).to(device).view(-1,1),
+        -bound * 0.3 * torch.ones_like(internal_points[:,0]).to(device).view(-1,1)
+    ])
+    # TODO try passing in y not as SDF values, but as segmentation mask values...? or affordances?
+    # What should external and internal labels be?
+    # TODO what is this 0.3 here??
 
-    y = torch.vstack([bound * torch.ones_like(externel_points[:,0]).cuda().view(-1,1),
-                      torch.zeros_like(points[mask][:,0]).cuda().view(-1,1),
-                      torch.zeros_like(points[~mask][:,0]).cuda().view(-1,1),
-                      #torch.zeros_like(points[~mask][:,0]).cuda().view(-1,1),
-                      #torch.zeros_like(points[~mask][:,0]).cuda().view(-1,1),
-                      torch.zeros_like(points2[~mask2][:,0]).cuda().view(-1,1),
-                     -bound * torch.ones_like(internal_points[:,0]).cuda().view(-1,1)])
-    print(y.shape)
-    gpis.fit(torch.vstack([externel_points, 
-                           points[mask], 
-                           points[~mask],
-                           #points[~mask] + torch.randn_like(points[~mask]) * torch.tensor([0.01,0.003,0.003]).cuda(),
-                           #points[~mask] + torch.randn_like(points[~mask]) * torch.tensor([0.01,0.003,0.003]).cuda(),
-                           points2[~mask2],
-                           internal_points]), 
-                           y,noise=torch.tensor([0.2] * len(externel_points)+
-                                                [0.005] * len(points[mask]) +  # Observed
-                                                [0.01] * len(points[~mask]) +  # Completion 1
-                                                #[0.02] * len(points[~mask]) +  # Completion 2
-                                                #[0.02] * len(points[~mask]) +  # Completion 3
-                                                [0.02] * len(points2[~mask2]) +  # Completion 2
-                                                [0.2] * len(internal_points)).double().cuda()) # Internal points
-    test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data([-bound,-bound,-bound],[bound,bound,bound],steps=100)
-    np.savez("gpis_states/mug_gpis.npz", mean=test_mean, var=test_var, normal=test_normal, ub=ub, lb=lb)
-    np.savez("gpis_states/mug2_gpis.npz", mean=test_mean, var=test_var, normal=test_normal, ub=ub, lb=lb)
-    gpis.save_state_data("mug_state")
-    gpis.save_state_data("mug2_state")
+    gpis.fit(
+        torch.vstack([external_points, points, internal_points]),
+        y,
+        noise = torch.tensor([0.2] * len(external_points)+
+            data_noise + [0.05] * len(internal_points)).double().to(device)
+    )
+
+    # Visualize 
+    test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data(
+        [-bound+center[0],-bound+center[1],-bound+center[2]],
+        [bound+center[0],bound+center[1],bound+center[2]],
+        steps=100
+    )
     plt.imshow(test_mean[:,:,50], cmap="seismic", vmax=bound, vmin=-bound)
     plt.show()
 
-    points, normals = gpis.topcd(test_mean, test_normal, [-bound,-bound,-bound],[bound,bound,bound],steps=100)
+    vis_points, vis_normals, vis_var = gpis.topcd(
+        test_mean,
+        test_normal,
+        [-bound+center[0],-bound+center[1],-bound+center[2]],
+        [bound+center[0],bound+center[1],bound+center[2]],
+        test_var=test_var,
+        steps=100,
+    )
+    vis_var = vis_var / vis_var.max()
     fitted_pcd = o3d.geometry.PointCloud()
-    fitted_pcd.points = o3d.utility.Vector3dVector(points)
-    fitted_pcd.normals = o3d.utility.Vector3dVector(normals)
-    rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(fitted_pcd)[0]
-    rec_mesh.compute_vertex_normals()
-    rec_mesh.compute_triangle_normals()
-    rec_mesh.paint_uniform_color([0.7, 0.7, 0.7])
+    fitted_pcd.points = o3d.utility.Vector3dVector(vis_points)
+    fitted_pcd.normals = o3d.utility.Vector3dVector(vis_normals)
+    # Create color code from variance
+    colors = np.zeros_like(vis_points)
+    colors[:,0] = vis_var
+    colors[:,2] = 1 - vis_var
+    fitted_pcd.colors = o3d.utility.Vector3dVector(colors)
     o3d.visualization.draw_geometries([fitted_pcd])
-    o3d.visualization.draw_geometries([rec_mesh])
+
+    gpis_dict = {
+        "mean": test_mean,
+        "var": test_var,
+        "normal": test_normal,
+        "ub": ub,
+        "lb": lb,
+        "bound": bound,
+        "center": center,
+        "points": points.cpu().detach().numpy(),
+    }
+    np.savez_compressed("gpis.npz", data=gpis_dict)
+
+    # Mesh reconstruction of point cloud
+    #rec_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(fitted_pcd)[0]
+    #rec_mesh.compute_vertex_normals()
+    #rec_mesh.compute_triangle_normals()
+    #rec_mesh.paint_uniform_color([0.7, 0.7, 0.7])
+    #o3d.visualization.draw_geometries([rec_mesh])
     
 
