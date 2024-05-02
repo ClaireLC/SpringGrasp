@@ -56,7 +56,7 @@ if __name__ == "__main__":
     parser.add_argument("--vis_gpis", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
     parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
-    parser.add_argument("--vis", choices=["pb", "o3d"], default="o3d", help="Visualize mode. If not specified, do not show vis.")
+    parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
     args = parser.parse_args()
 
@@ -124,7 +124,14 @@ if __name__ == "__main__":
                                                                             [bound+center[0],bound+center[1],bound+center[2]],steps=100)
         plt.imshow(test_mean[:,:,50], cmap="seismic", vmax=bound, vmin=-bound)
         plt.show()
-        vis_points, vis_normals, vis_var = gpis.topcd(test_mean, test_normal, [-bound+center[0],-bound+center[1],-bound+center[2]],[bound+center[0],bound+center[1],bound+center[2]],test_var=test_var,steps=100)
+        vis_points, vis_normals, vis_var = gpis.topcd(
+            test_mean,
+            test_normal,
+            [-bound+center[0],-bound+center[1],-bound+center[2]],
+            [bound+center[0],bound+center[1],bound+center[2]],
+            test_var=test_var,
+            steps=100,
+        )
         vis_var = vis_var / vis_var.max()
         fitted_pcd = o3d.geometry.PointCloud()
         fitted_pcd.points = o3d.utility.Vector3dVector(vis_points)
@@ -171,37 +178,42 @@ if __name__ == "__main__":
         robot_urdf = "assets/allegro_hand/allegro_hand_description_right.urdf"
 
     if args.mode == "fc":
-        grasp_optimizer = optimizers[args.mode](robot_urdf,
-                                                ee_link_names=robot_configs[args.hand]["ee_link_name"],
-                                                ee_link_offsets=robot_configs[args.hand]["ee_link_offset"].tolist(),
-                                                anchor_link_names=robot_configs[args.hand]["collision_links"],
-                                                anchor_link_offsets=robot_configs[args.hand]["collision_offsets"].tolist(),
-                                                collision_pairs=robot_configs[args.hand]["collision_pairs"],
-                                                ref_q = robot_configs[args.hand]["ref_q"].tolist(),
-                                                optimize_target=True,
-                                                optimize_palm=True, # NOTE: Experimental
-                                                num_iters=args.num_iters,
-                                                palm_offset=init_wrist_poses,
-                                                uncertainty=20.0,
-                                                # Useless for now
-                                                mass=args.mass, 
-                                                com=[args.com_x,args.com_y,args.com_z],
-                                                gravity=False)
+        grasp_optimizer = optimizers[args.mode](
+            robot_urdf,
+            ee_link_names=robot_configs[args.hand]["ee_link_name"],
+            ee_link_offsets=robot_configs[args.hand]["ee_link_offset"].tolist(),
+            anchor_link_names=robot_configs[args.hand]["collision_links"],
+            anchor_link_offsets=robot_configs[args.hand]["collision_offsets"].tolist(),
+            collision_pairs=robot_configs[args.hand]["collision_pairs"],
+            ref_q = robot_configs[args.hand]["ref_q"].tolist(),
+            optimize_target=True,
+            optimize_palm=True, # NOTE: Experimental
+            num_iters=args.num_iters,
+            palm_offset=init_wrist_poses,
+            uncertainty=20.0,
+            # Useless for now
+            mass=args.mass, 
+            com=[args.com_x,args.com_y,args.com_z],
+            gravity=False
+        )
     elif args.mode == "sp":
-        grasp_optimizer = optimizers[args.mode](robot_urdf,
-                                                ee_link_names=robot_configs[args.hand]["ee_link_name"],
-                                                ee_link_offsets=robot_configs[args.hand]["ee_link_offset"].tolist(),
-                                                anchor_link_names=robot_configs[args.hand]["collision_links"],
-                                                anchor_link_offsets=robot_configs[args.hand]["collision_offsets"].tolist(),
-                                                collision_pairs=robot_configs[args.hand]["collision_pairs"],
-                                                ref_q = robot_configs[args.hand]["ref_q"].tolist(),
-                                                optimize_target=True,
-                                                optimize_palm=True, # NOTE: Experimental
-                                                num_iters=args.num_iters,
-                                                palm_offset=init_wrist_poses,
-                                                mass=args.mass, com=center[:3],
-                                                gravity=False,
-                                                weight_config=weight_config)
+        grasp_optimizer = optimizers[args.mode](
+            robot_urdf,
+            ee_link_names=robot_configs[args.hand]["ee_link_name"],
+            ee_link_offsets=robot_configs[args.hand]["ee_link_offset"].tolist(),
+            anchor_link_names=robot_configs[args.hand]["collision_links"],
+            anchor_link_offsets=robot_configs[args.hand]["collision_offsets"].tolist(),
+            collision_pairs=robot_configs[args.hand]["collision_pairs"],
+            ref_q = robot_configs[args.hand]["ref_q"].tolist(),
+            optimize_target=True,
+            optimize_palm=True, # NOTE: Experimental
+            num_iters=args.num_iters,
+            palm_offset=init_wrist_poses,
+            mass=args.mass,
+            com=center[:3],
+            gravity=False,
+            weight_config=weight_config
+        )
 
     # Get intial conditions
     num_guesses = len(init_wrist_poses)

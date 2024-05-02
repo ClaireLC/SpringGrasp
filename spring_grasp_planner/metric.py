@@ -25,36 +25,52 @@ def optimal_transformation_batch(S1, S2, weight):
 
 # Assume friction is uniform
 # Differentiable 
-def force_eq_reward(tip_pose, target_pose, compliance, friction_mu, current_normal, mass=0.4, gravity=None, M=0.2, COM=[0.0, 0.05, 0.0]):
+def force_eq_reward(
+    tip_pose,
+    target_pose,
+    compliance,
+    friction_mu,
+    current_normal,
+    mass=0.4,
+    gravity=None,
+    M=0.2,
+    COM=[0.0, 0.05, 0.0]
+):
     """
     Params:
-    tip_pose: world frame [num_envs, num_fingers, 3]
-    target_pose: world frame [num_envs, num_fingers, 3]
+    tip_pose: contact position, world frame [num_envs, num_fingers, 3]
+    target_pose: target fingertip position, world frame [num_envs, num_fingers, 3]
     compliance: [num_envs, num_fingers]
-    friction_mu: scaler
+    friction_mu: scalar
     current_normal: world frame [num_envs, num_fingers, 3]
     
     Returns:
     reward: [num_envs]
     """
-    # Prepare dummy gravity
     # Assume COM is at center of target
     if COM is not None:
         com = torch.tensor(COM).to(device).double()
+
+    # Prepare dummy gravity
     if gravity is not None:
         dummy_tip = torch.zeros(tip_pose.shape[0], 1, 3).cpu()
         dummy_tip[:,0,:] = target_pose.mean(dim=1) if COM is None else com
         dummy_target = torch.zeros(target_pose.shape[0], 1, 3).cpu()
         dummy_target[:,0,2] = -M # much lower than center of mass
         dummy_compliance = gravity * mass/M * torch.ones(compliance.shape[0], 1).cpu()
+        # Compute transformation of object to its equilibrium pose given contact pos, target pos, compliance
         R,t = optimal_transformation_batch(torch.cat([tip_pose, dummy_tip], dim=1), 
                                            torch.cat([target_pose, dummy_target], dim=1), 
                                            torch.cat([compliance, dummy_compliance], dim=1))
     else:
+        # Compute transformation of object to its equilibrium pose given contact pos, target pos, compliance
         R,t = optimal_transformation_batch(tip_pose, target_pose, compliance)
-    # tip position at equilirium
-    tip_pose_eq = (R@tip_pose.transpose(1,2)).transpose(1,2) + t.unsqueeze(1)
-    diff_vec = tip_pose_eq - target_pose
+
+    # Tip position at equilirium
+    tip_pose_eq = (R@tip_pose.transpose(1,2)).transpose(1,2) + t.unsqueeze(1) # contact pos at equilibrium
+
+    ## Eqn (4): model contact force as virtual spring force
+    diff_vec = tip_pose_eq - target_pose # Vector b/w contact pos at eq and target pos
     force = compliance.unsqueeze(2) * (-diff_vec)
     dir_vec = diff_vec / diff_vec.norm(dim=2).unsqueeze(2)
     # Rotate local norm to equilibrium pose
@@ -70,7 +86,7 @@ def force_eq_reward(tip_pose, target_pose, compliance, friction_mu, current_norm
     # we hope margin to be as large as possible, never below zero
     force_norm = force.norm(dim=2)
     reward = (0.2 * torch.log(ang_diff+1)+ 0.8 * torch.log(margin+1)).sum(dim=1)
-    return reward , margin, force_norm, R, t
+    return reward, margin, force_norm, R, t
     
 def check_force_closure(tip_pose, target_pose, compliance, R, t, COM, mass, gravity):
     #R, t = optimal_transformation_batch(tip_pose.cpu().unsqueeze(0), target_pose.cpu().unsqueeze(0), compliance.cpu().unsqueeze(0))

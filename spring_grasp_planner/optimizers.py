@@ -607,23 +607,54 @@ class FCGPISGraspOptimizer:
         return opt_tip_pose, opt_compliance, opt_target_pose, opt_palm_poses, opt_margin, opt_joint_angle
 
 class SpringGraspOptimizer:
-    def __init__(self, 
-                 robot_urdf, 
-                 ee_link_names,
-                 ee_link_offsets = EE_OFFSETS,
-                 palm_offset=WRIST_OFFSET, # Should be a [num_envs, 6] matrix, 
-                 num_iters=1000, optimize_target=False,
-                 ref_q=None,
-                 pregrasp_coefficients = [[0.7,0.7,0.7,0.7]],
-                 pregrasp_weights = [1.0],
-                 anchor_link_names = None,
-                 anchor_link_offsets = None,
-                 collision_pairs = None,
-                 collision_pair_threshold = 0.02,
-                 mass = 0.1, com = [0.0, 0.0, 0.0], gravity=True,
-                 optimize_palm = False,
-                 num_samples = 10,
-                 weight_config = None):
+    def __init__(
+        self, 
+        robot_urdf, 
+        ee_link_names,
+        ee_link_offsets = EE_OFFSETS,
+        palm_offset=WRIST_OFFSET, # Should be a [num_envs, 6] matrix, 
+        num_iters=1000,
+        optimize_target=False,
+        optimize_palm = False,
+        ref_q=None,
+        pregrasp_coefficients = [[0.7,0.7,0.7,0.7]],
+        pregrasp_weights = [1.0],
+        anchor_link_names = None,
+        anchor_link_offsets = None,
+        collision_pairs = None,
+        collision_pair_threshold = 0.02,
+        gravity=True,
+        mass = 0.1,
+        com = [0.0, 0.0, 0.0],
+        num_samples = 10,
+        weight_config = None
+    ):
+        """
+        Initialize optimization parameters
+        args:
+            robot_urdf: path to robot urdf
+            ee_link_names (list): list of end-effector link names
+            ee_link_offsets (list): list of offsets ([x,y,z]) to end-effector control points
+            palm_offset (np.array): initial wrist poses [num_env, 6]
+            num_iters (int): number of optimization interations
+            optimize_target (bool): if true, optimize finger target pose
+            optimize_palm (bool): if true, optimize palm pose
+            ref_q (list): if specified, reference nominal joint positions for each finger
+            pregrasp_coefficients: adjusts relative distance between surface and target position.
+                Larger values will make pre-grasp fingertip positions closer to surface. 
+                [[first set of coeffs to try], [second set of coeffs to try]]
+            pregrasp_weights: TODO
+            anchor_link_names: collision link names
+            anchor_link_offsets: collision link offsets
+            collision_pairs: List of self collision link pairs
+            collision_pair_threshold: Self collision penalty threshold
+            gravity: if true, include gravity in optimization
+            mass (float): mass of object
+            com (list): center of mass of object
+            num_samples: number of points along contact neighborhood line segment
+                when computing uncertainty loss term
+            weight_config: if specified, initial weights to use
+        """
         self.ref_q = torch.tensor(ref_q).to(device)
         self.robot_model = DifferentiableRobotModel(robot_urdf, device=device)
         self.num_iters = num_iters
@@ -678,6 +709,8 @@ class SpringGraspOptimizer:
 
     def forward_kinematics(self, joint_angles, palm_poses=None, link_names=None):
         """
+        Compute fingertip positions given joint angles and palm poses
+
         :params: joint_angles: [num_envs, num_dofs]
         :params: palm_offset: [num_envs, 3]
         :return: tip_poses: [num_envs * num_fingers, 3]
@@ -698,12 +731,18 @@ class SpringGraspOptimizer:
     def compute_collision_loss(self, joint_angles, palm_poses=None):
         if palm_poses is None:
             palm_poses = self.palm_offset
-        anchor_pose = self.robot_model.compute_forward_kinematics(joint_angles.float(), 
-                                                                  self.anchor_link_names, 
-                                                                  offsets=self.anchor_link_offsets, 
-                                                                  recursive=False)[0].double().view(-1,len(self.anchor_link_names),3)
+        
+        # Get pose of collision links
+        anchor_pose = self.robot_model.compute_forward_kinematics(
+            joint_angles.float(), 
+            self.anchor_link_names, 
+            offsets=self.anchor_link_offsets, 
+            recursive=False
+        )[0].double().view(-1,len(self.anchor_link_names),3)
         R = euler_angles_to_matrix(palm_poses[:,3:], convention="XYZ") #[num_envs, 3, 3]
-        anchor_pose = torch.bmm(R, anchor_pose.transpose(1,2)).transpose(1,2) + palm_poses[:,:3].unsqueeze(1)
+        anchor_pose = torch.bmm(R, anchor_pose.transpose(1,2)).transpose(1,2) + palm_poses[:,:3].unsqueeze(1) # TODO ?? transform by palm pose
+
+        ## Self collision
         collision_pair_left = anchor_pose[:,self.collision_pair_left]
         collision_pair_right = anchor_pose[:,self.collision_pair_right]
         dist = torch.norm(collision_pair_left - collision_pair_right, dim=2) # [num_collision_pairs]
@@ -712,13 +751,15 @@ class SpringGraspOptimizer:
         inverse_dist = 1.0 / dist
         inverse_dist[~mask] *= 0.0
         cost =  inverse_dist.sum(dim=1)
+
         # Add ground collision cost
         #z_mask = anchor_pose[:,:,2] < 0.02
         z_dist_cost = 1/(anchor_pose[:,:,2]) * 0.1
         #z_dist_cost[~z_mask] *= 0.0
         z_cost = z_dist_cost.sum(dim=1)
         cost += z_cost
-        # add palm-floor collision cost
+
+        # Add palm-floor collision cost
         if self.optimize_palm:
             palm_z_mask = palm_poses[:,2] < 0.02
             palm_z_dist_cost = 1/(palm_poses[:,2])
@@ -738,54 +779,100 @@ class SpringGraspOptimizer:
 
     # assume all_tip_pose has same shape as target_pose
     def compute_loss(self, all_tip_pose, joint_angles, target_pose, compliance, friction_mu, gpis):
+        """
+        args:
+            all_tip_pose: contact positions at t_0 (p(t_0)) [num_envs, 4, 3]
+            joint_angles:  initial pre-grasp joint angles
+            target_pose: target grasp positions
+            compliance: gains
+            friction_mu: friction coefficient
+            gpis: GPIS of object
+        """
         # All tip pose should be [num_envs*1, 4, 3]
         # Should use pregrasp tip_pose for sampling
-        dist, var = gpis.pred(all_tip_pose)
-        tar_dist, _ = gpis.pred(target_pose)
-        current_normal = gpis.compute_normal(all_tip_pose)
-        task_reward, margin, force_norm, R, t = force_eq_reward(
-                            all_tip_pose,
-                            target_pose,
-                            compliance,
-                            friction_mu, 
-                            current_normal.view(target_pose.shape),
-                            mass=self.mass,
-                            COM = self.com,
-                            gravity=10.0 if self.gravity else None)
 
+        dist, var = gpis.pred(all_tip_pose) # contact pos distance and var
+        tar_dist, _ = gpis.pred(target_pose) # target pos distance
+        current_normal = gpis.compute_normal(all_tip_pose) # surface normal at contact pos
+
+        # Compute SpringGrasp energy (Eqn. (5))
+        # margin: margin at equilibrium, after grasp
+        task_reward, margin, force_norm, R, t = force_eq_reward(
+            all_tip_pose,
+            target_pose,
+            compliance,
+            friction_mu, 
+            current_normal.view(target_pose.shape),
+            mass=self.mass,
+            COM = self.com,
+            gravity=10.0 if self.gravity else None # TODO why is gravity +??
+        )
         # initial feasibility should be equally important as task reward.
-        c = -task_reward - self.compute_contact_margin(all_tip_pose, target_pose, current_normal, friction_mu=friction_mu)/2
+        # Here, we are computing the margin at contact point at t_0 (before equilibrium)
+        t_0_margin = self.compute_contact_margin(all_tip_pose, target_pose, current_normal, friction_mu=friction_mu)
+        c = -task_reward - t_0_margin/2 # This is the SpringGrasp cost
+
+        # Regularization terms (Eqn. (17))
         offsets = torch.tensor([0.0, 0.0, 0.0]).to(device)
         reg_cost = (torch.bmm(R,all_tip_pose.transpose(1,2)).transpose(1,2) + t.unsqueeze(1) - all_tip_pose - offsets).norm(dim=2).sum(dim=1) * 200.0
         reg_cost += (joint_angles - self.ref_q).norm(dim=1)
         force_cost = -force_norm.clamp(max=2.0).mean(dim=1)
         
+        # Compute contact probability at all_tip_pose (contact pos)
         contact_prob = 1.0/(torch.sqrt(var))*torch.exp(-dist**2/(2*var))
         #variance_cost = self.uncertainty * torch.log(100 * var).max(dim=1)[0]
         #print(float(variance_cost.max(dim=1)[0]))
-        dist_cost = torch.abs(dist).sum(dim=1)
-        tar_dist_cost = tar_dist.sum(dim=1) # 30
+
+        dist_cost = torch.abs(dist).sum(dim=1) # E_dist: make contact pos be on object surface
+        tar_dist_cost = tar_dist.sum(dim=1) # E_tar: make target pos be inside object
+
+        # Total loss
         l = c * self.w_sp + dist_cost * self.w_dist + tar_dist_cost * self.w_tar + \
             force_cost * self.w_force + reg_cost * self.w_reg + self.w_gain * compliance.sum(dim=1)
         #print("All costs:", float(c.mean()), float(dist_cost.mean()), float(tar_dist_cost.mean()), float(center_cost.mean()), float(force_cost.mean()), float(ref_cost.mean()), float(variance_cost.mean()), float(reg_cost.mean()))
         return l, margin, R, t, contact_prob
 
     def closure(self, joint_angles, compliance, target_pose, palm_poses, palm_oris, friction_mu, gpis, num_envs):
+        """
+        Compute total loss
+
+        args:
+            joint_angles:  initial pre-grasp joint angles
+            compliance: gains
+            target_pose: target grasp positions
+            palm_poses: palm xyz positions
+            palm_oris: palm orientations
+            friction_mu: friction coefficients
+            gpis: GPIS of object
+        """
         self.optim.zero_grad()
         palm_posori = torch.hstack([palm_poses, palm_oris])
         self.pregrasp_tip_pose = self.forward_kinematics(joint_angles, palm_posori)
     
-        
-        # Compute expected loss
-        target_pose_extended = target_pose.repeat(len(self.pregrasp_coefficients),1,1)
+        # Repeat target and pre-grasp positions based on number of sets of pre-grasp coeffs to try 
+        # Interleave pregrasp_coefficients accordingly
+        target_pose_extended = target_pose.repeat(len(self.pregrasp_coefficients),1,1) # [num_envs * len(self.pregrasp_coefficients), 4, 3]
         pregrasp_tip_pose_extended = self.pregrasp_tip_pose.repeat(len(self.pregrasp_coefficients),1,1) #[e1,e2,e3,e4,e1,e2,e3,e4, ...]
         pregrasp_coeffs = self.pregrasp_coefficients.repeat_interleave(num_envs,dim=0)
-        all_tip_pose = target_pose_extended + pregrasp_coeffs.view(-1, 4, 1) * (pregrasp_tip_pose_extended - target_pose_extended)
-        l, margin, R, t, contact_prob = self.compute_loss(all_tip_pose, # [num_envs*num_coeffs, 4, 3]
-                                      joint_angles.repeat(len(self.pregrasp_coefficients), 1), 
-                                      target_pose_extended, 
-                                      compliance.repeat(len(self.pregrasp_coefficients), 1), friction_mu, gpis)
 
+        # Compute contact position p(t_0)
+        all_tip_pose = target_pose_extended + pregrasp_coeffs.view(-1, 4, 1) * (pregrasp_tip_pose_extended - target_pose_extended)
+
+        # Compute task loss (E_sp, E_dist, E_gain, E_tar, E_reg)
+        # contact_prob: probability of contact at all_tip_pose (contact pos)
+        l, margin, R, t, contact_prob = self.compute_loss(
+            all_tip_pose, # [num_envs*num_coeffs, 4, 3]
+            joint_angles.repeat(len(self.pregrasp_coefficients), 1), 
+            target_pose_extended, 
+            compliance.repeat(len(self.pregrasp_coefficients), 1),
+            friction_mu,
+            gpis,
+        )
+        self.R, self.t = R, t
+        task_loss = l
+        self.total_margin = (self.pregrasp_weights.view(-1,1,1) * margin.view(-1, num_envs, 4)).sum(dim=0)
+
+        # Compute E_uncer (Eqn. (10))
         interp = torch.linspace(0, 1, self.num_samples).to(device).view(1, self.num_samples, 1, 1)
         delta_vector = (self.pregrasp_tip_pose - target_pose).unsqueeze(1).repeat(1, self.num_samples, 1, 1) * interp
         sample_points = target_pose.unsqueeze(1).repeat(1, self.num_samples, 1, 1) + delta_vector
@@ -795,18 +882,21 @@ class SpringGraspOptimizer:
         # Normalize sample probability
         normalization_factor = sample_prob.sum(dim=1) # [num_envs, 4, 1]
         sample_prob = sample_prob / normalization_factor.unsqueeze(1) 
-        
         contact_prob = (contact_prob.unsqueeze(2) / normalization_factor).unsqueeze(1) # [num_envs, 1, 4, 1]
         total_prominence = (contact_prob - sample_prob).sum(dim=1).squeeze(-1) # [num_envs, 4]
         prominence_loss = total_prominence.sum(dim=1) # NOTE: Variance loss
         total_loss = -prominence_loss * self.w_uncer # NOTE: Variance loss
-        self.R, self.t = R, t
-        task_loss = l
+
+        # Add task loss
         total_loss += task_loss
-        self.total_margin = (self.pregrasp_weights.view(-1,1,1) * margin.view(-1, num_envs, 4)).sum(dim=0)
+
+        # TODO ??
         pre_dist, _ = gpis.pred(self.pregrasp_tip_pose)
         pre_dist_loss = -pre_dist.sum(dim=1) * 50.0 # NOTE: Experimental
         total_loss += pre_dist_loss # Ignored for now
+
+        # Collision loss terms
+
         # Palm to object distance
         if self.optimize_palm:
             palm_dist,_ = gpis.pred(palm_poses)
@@ -814,6 +904,7 @@ class SpringGraspOptimizer:
             palm_dist_loss = 1/palm_dist # Need to ensure palm is outside the object.
             total_loss += palm_dist_loss
             #print("palm dist:", float(palm_dist.mean()))
+
         # Hand object collision loss
         link_pos = self.forward_kinematics(joint_angles, palm_posori, link_names=["link_1.0", "link_2.0", "link_3.0",
                                                                                   "link_5.0", "link_6.0", "link_7.0",
@@ -830,13 +921,16 @@ class SpringGraspOptimizer:
 
     def optimize(self, init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True):
         """
+        Solve optimization problem
+
         NOTE: scale matters in running optimization, need to normalize the scale
         Params:
-        joint_angles: [num_envs, num_dofs]
+        init_joint_angles: [num_envs, num_dofs]
         target_pose: [num_envs, num_fingers, 3]
         compliance: [num_envs, num_fingers]
-        opt_mask: [num_envs, num_fingers]
         """
+
+        # Set up optimization variables
         joint_angles = init_joint_angles.clone().requires_grad_(True)
         compliance = compliance.clone().requires_grad_(True)
         params_list = [{"params":joint_angles, "lr":2e-3},
@@ -864,15 +958,28 @@ class SpringGraspOptimizer:
         start_ts = time.time()
         for s in range(self.num_iters):
             if isinstance(self.optim, torch.optim.LBFGS):
-                self.optim.step(partial(self.closure, joint_angles=joint_angles,
-                                                      compliance=compliance, 
-                                                      target_pose=target_pose, 
-                                                      palm_poses=palm_poses, 
-                                                      palm_oris=palm_oris, 
-                                                      friction_mu=friction_mu, 
-                                                      gpis=gpis, num_envs=num_envs))
+                self.optim.step(partial(
+                    self.closure,
+                    joint_angles=joint_angles,
+                    compliance=compliance, 
+                    target_pose=target_pose, 
+                    palm_poses=palm_poses, 
+                    palm_oris=palm_oris, 
+                    friction_mu=friction_mu, 
+                    gpis=gpis,
+                    num_envs=num_envs
+                ))
             else:
-                loss = self.closure(joint_angles, compliance, target_pose, palm_poses, palm_oris, friction_mu, gpis, num_envs)
+                loss = self.closure(
+                    joint_angles,
+                    compliance,
+                    target_pose,
+                    palm_poses,
+                    palm_oris,
+                    friction_mu,
+                    gpis,
+                    num_envs
+                )
             if verbose:
                 print(f"Step {s} Loss:",float(self.total_loss.mean()))
             if torch.isnan(self.total_loss.sum()):
