@@ -87,39 +87,50 @@ if __name__ == "__main__":
         WRIST_OFFSET[:,2] += 2 * center[2]
         init_wrist_poses = WRIST_OFFSET
     
-    # GPIS formulation
+    # GPIS formulation - load or fit
+    gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
-    gpis = GPIS(0.08, 1)
-    pcd_simple = pcd.farthest_point_down_sample(200)
-    points = np.asarray(pcd_simple.points)
-    points = torch.tensor(points).to(device).double()
-    data_noise = [0.005] * len(points)
-    weights = torch.rand(50,len(points)).to(device).double()
-    weights = torch.softmax(weights * 100, dim=1)
-    internal_points = weights @ points
-    externel_points = torch.tensor([[-bound, -bound, -bound], 
-                                    [bound, -bound, -bound], 
-                                    [-bound, bound, -bound],
-                                    [bound, bound, -bound],
-                                    [-bound, -bound, bound], 
-                                    [bound, -bound, bound], 
-                                    [-bound, bound, bound],
-                                    [bound, bound, bound],
-                                    [-bound,0., 0.], 
-                                    [0., -bound, 0.], 
-                                    [bound, 0., 0.], 
-                                    [0., bound, 0],
-                                    [0., 0., bound], 
-                                    [0., 0., -bound]]).double().to(device)
-    externel_points += torch.from_numpy(center).to(device).double()
-    y = torch.vstack([bound * torch.ones_like(externel_points[:,0]).to(device).view(-1,1),
-                    torch.zeros_like(points[:,0]).to(device).view(-1,1),
-                    -bound * 0.3 * torch.ones_like(internal_points[:,0]).to(device).view(-1,1)])
-    gpis.fit(torch.vstack([externel_points, points, internal_points]), y,
-                noise = torch.tensor([0.2] * len(externel_points)+
-                                    data_noise +
-                                    [0.05] * len(internal_points)).double().to(device))
+    if os.path.exists(gpis_save_path):
+        # Load
+        print("Loading GPIS from", gpis_save_path)
+        gpis = torch.load(gpis_save_path)
+    else:
+        # Fit
+        print("Fitting GPIS...")
+        gpis = GPIS(0.08, 1)
+        pcd_simple = pcd.farthest_point_down_sample(200)
+        points = np.asarray(pcd_simple.points)
+        points = torch.tensor(points).to(device).double()
+        data_noise = [0.005] * len(points)
+        weights = torch.rand(50,len(points)).to(device).double()
+        weights = torch.softmax(weights * 100, dim=1)
+        internal_points = weights @ points
+        externel_points = torch.tensor([[-bound, -bound, -bound], 
+                                        [bound, -bound, -bound], 
+                                        [-bound, bound, -bound],
+                                        [bound, bound, -bound],
+                                        [-bound, -bound, bound], 
+                                        [bound, -bound, bound], 
+                                        [-bound, bound, bound],
+                                        [bound, bound, bound],
+                                        [-bound,0., 0.], 
+                                        [0., -bound, 0.], 
+                                        [bound, 0., 0.], 
+                                        [0., bound, 0],
+                                        [0., 0., bound], 
+                                        [0., 0., -bound]]).double().to(device)
+        externel_points += torch.from_numpy(center).to(device).double()
+        y = torch.vstack([bound * torch.ones_like(externel_points[:,0]).to(device).view(-1,1),
+                        torch.zeros_like(points[:,0]).to(device).view(-1,1),
+                        -bound * 0.3 * torch.ones_like(internal_points[:,0]).to(device).view(-1,1)])
+        gpis.fit(torch.vstack([externel_points, points, internal_points]), y,
+                    noise = torch.tensor([0.2] * len(externel_points)+
+                                        data_noise +
+                                        [0.05] * len(internal_points)).double().to(device))
+        torch.save(gpis, gpis_save_path)
+        print("Saved GPIS to", gpis_save_path)
     if args.vis_gpis:
+        print("Visualizing GPIS...")
         test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data([-bound+center[0],-bound+center[1],-bound+center[2]],
                                                                             [bound+center[0],bound+center[1],bound+center[2]],steps=100)
         plt.imshow(test_mean[:,:,50], cmap="seismic", vmax=bound, vmin=-bound)
@@ -161,6 +172,7 @@ if __name__ == "__main__":
             save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.ply")
             print("Saving GPIS viz pcd to:", save_path)
             o3d.io.write_point_cloud(save_path, fitted_pcd)  
+        quit()
 
     init_tip_pose = torch.tensor([[[0.05,0.05, 0.02],[0.06,-0.0, -0.01],[0.03,-0.04,0.0],[-0.07,-0.01, 0.02]]]).double().to(device)
     init_joint_angles = torch.tensor(robot_configs[args.hand]["ref_q"].tolist()).unsqueeze(0).double().to(device)
