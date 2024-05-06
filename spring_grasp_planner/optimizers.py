@@ -795,7 +795,7 @@ class SpringGraspOptimizer:
         tar_dist, _ = gpis.pred(target_pose) # target pos distance
         current_normal = gpis.compute_normal(all_tip_pose) # surface normal at contact pos
 
-        # Compute SpringGrasp energy (Eqn. (5))
+        # Compute second term (TODO ??) of SpringGrasp energy (Eqn. (5)) 
         # margin: margin at equilibrium, after grasp
         task_reward, margin, force_norm, R, t = force_eq_reward(
             all_tip_pose,
@@ -810,7 +810,7 @@ class SpringGraspOptimizer:
         # initial feasibility should be equally important as task reward.
         # Here, we are computing the margin at contact point at t_0 (before equilibrium)
         t_0_margin = self.compute_contact_margin(all_tip_pose, target_pose, current_normal, friction_mu=friction_mu)
-        c = -task_reward - t_0_margin/2 # This is the SpringGrasp cost
+        c = -task_reward - t_0_margin/2 # This is the SpringGrasp cost (Eqn. (5))
 
         # Regularization terms (Eqn. (17))
         offsets = torch.tensor([0.0, 0.0, 0.0]).to(device)
