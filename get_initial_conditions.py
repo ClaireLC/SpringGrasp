@@ -63,7 +63,8 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False):
 
         # Wrist pos is along plane normal
         base_pos = center + offset * normal * n_dir
-        print(f"Base pose: normal offset {n_dir*offset} | rot ({x_rot}, {y_rot}, {z_rot})")
+        if viz:
+            print(f"Base pose: normal offset {n_dir*offset} | rot ({x_rot}, {y_rot}, {z_rot})")
         
         # Define wrist ori so palm in perpendicular to plane normal
         # ie. in SpringGrasp convention, z axis is along plane normal
@@ -78,7 +79,8 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False):
         XYZ_ori = (base_r * xy_delta_r).as_euler("XYZ")
 
         # Create and append pose with base_pos (not translated along x and y) to list
-        print(f"  Pose {len(wrist_poses)} xy offset from base pos: none")
+        if viz:
+            print(f"  Pose {len(wrist_poses)} xy offset from base pos: none")
         pose = np.concatenate((base_pos, XYZ_ori))
         wrist_poses.append(pose)
         # Visualize local wrist frame
@@ -100,7 +102,8 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False):
             pos = (H_robot_to_world @ np.append(pos_rf, 1))[:3]
 
             # Create and append pose to list
-            print(f"  Pose {len(wrist_poses)} xy offset from base pos:", pos_rf)
+            if viz:
+                print(f"  Pose {len(wrist_poses)} xy offset from base pos:", pos_rf)
             pose = np.concatenate((pos, XYZ_ori))
             wrist_poses.append(pose)
 
