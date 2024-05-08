@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import itertools
 
 class GPIS:
     def __init__(self, sigma=0.6, bias=2, kernel="tps"):
@@ -151,22 +152,49 @@ def topcd(test_mean, test_normal, lb, ub, test_var=None, steps=100):
     lb, ub = np.asarray(lb), np.asarray(ub)
     
     if torch.is_tensor(test_mean):
-        test_mean = test_mean.cpu().numpy()[:,:,::-1]
+        test_mean = test_mean.cpu().numpy()
     if torch.is_tensor(test_normal):
-        test_normal = test_normal.cpu().numpy()[:,:,::-1]
+        test_normal = test_normal.cpu().numpy()
     internal = test_mean < 0.0
     # find every point in internel that is surrounded by at least one points that is not internal
     mask = np.zeros_like(internal)
-    for i in range(1,steps-1):
-        for j in range(1,steps-1):
-            for k in range(1,steps-1):
+    MAX_BORDER = 1
+    count = 0
+    for i in range(MAX_BORDER,steps-MAX_BORDER):
+        for j in range(MAX_BORDER,steps-MAX_BORDER):
+            for k in range(MAX_BORDER,steps-MAX_BORDER):
                 if internal[i,j,k]:
-                    if not internal[i-1,j,k] or not internal[i+1,j,k] or not internal[i,j-1,k] or not internal[i,j+1,k] or not internal[i,j,k-1] or not internal[i,j,k+1]:
+                    #if (
+                    #    not internal[i-1,j,k] or
+                    #    not internal[i+1,j,k] or
+                    #    not internal[i,j-1,k] or
+                    #    not internal[i,j+1,k] or
+                    #    not internal[i,j,k-1] or
+                    #    not internal[i,j,k+1]
+                    #):
+                    at_least_one_external = False
+                    for delta in itertools.product(
+                        list(range(-MAX_BORDER, MAX_BORDER+1)),
+                        list(range(-MAX_BORDER, MAX_BORDER+1)),
+                        list(range(-MAX_BORDER, MAX_BORDER+1)),
+                    ):
+                        dx = delta[0]
+                        dy = delta[1]
+                        dz = delta[2]
+                        if dx == 0 and dy == 0 and dz == 0: continue
+                        at_least_one_external = at_least_one_external or not internal[i+dx, j+dy, k+dz]
+                        #if at_least_one_external: break
+                    if at_least_one_external:
                         mask[i,j,k] = 1
     # get three index of each masked point
-    all_points = np.stack(np.meshgrid(np.linspace(lb[0],ub[0],steps),
-                                  np.linspace(lb[1],ub[1],steps),
-                                  np.linspace(lb[2],ub[2],steps),indexing="xy"),axis=3)
+    all_points = np.stack(
+        np.meshgrid(
+            np.linspace(lb[0],ub[0],steps),
+            np.linspace(lb[1],ub[1],steps),
+            np.linspace(lb[2],ub[2],steps),indexing="xy"
+        ),
+        axis=3
+    )
     normals = test_normal[mask]
     # convert index to pointcloud
     points = all_points[mask]
@@ -225,16 +253,15 @@ if __name__ == "__main__":
         points = np.asarray(pcd.points)
     else:
         # Create point cloud from mesh
-        mesh = o3d.geometry.TriangleMesh.create_box(0.2, 0.2, 0.2)
+        mesh = o3d.geometry.TriangleMesh.create_box(0.05, 0.1, 0.2)
         pcd = mesh.sample_points_poisson_disk(n_point)
 
     pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([0,1,0]), (len(pcd.points),1)))
-    o3d.visualization.draw_geometries([pcd])
+    #o3d.visualization.draw_geometries([pcd])
     points = np.asarray(pcd.points)
     np.random.shuffle(points)
     points = torch.from_numpy(points).to(device).double()
 
-    center = pcd.get_axis_aligned_bounding_box().get_center()
 
     # Compute internal points
     weights = torch.rand(50,len(points)).to(device).double()
@@ -246,7 +273,16 @@ if __name__ == "__main__":
     internal_pcd.colors = o3d.utility.Vector3dVector(np.tile(np.asarray([1,0,0]), (len(internal_points),1)))
 
     # External points
-    bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
+    aabb = pcd.get_axis_aligned_bounding_box()
+    obb = pcd.get_oriented_bounding_box()
+    bound = max(max(aabb.get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
+
+    obb_points = obb.get_box_points()
+    aabb_points = aabb.get_box_points()
+
+    center = aabb.get_center()
+    obb_center = obb.get_center()
+
     external_points = torch.tensor([
         [-bound, -bound, -bound], 
         [bound, -bound, -bound], 
