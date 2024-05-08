@@ -14,7 +14,7 @@ from gpis import topcd
 parser = ArgumentParser()
 parser.add_argument("--data", type=str)
 parser.add_argument("--stride", type=int, default=10)
-parser.add_argument("--axis", type=str, default="z")
+parser.add_argument("--axis", type=str, default="z", choices=["z"])
 parser.add_argument("--isf_limit", type=float, default=0.05)
 parser.add_argument("--quiver_spacing", type=int, default=5)
 parser.add_argument("--query_point", type=float, nargs=3, default=None)
