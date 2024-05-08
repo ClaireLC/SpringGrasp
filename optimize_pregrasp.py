@@ -7,6 +7,8 @@ from utils import robot_configs
 from utils.pb_grasp_visualizer import GraspVisualizer
 from utils.create_arrow import create_direct_arrow
 import os
+import wandb
+from datetime import date, datetime
 
 from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOptimizer
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
@@ -41,6 +43,38 @@ def vis_grasp(tip_pose, target_pose):
 optimizers = {"sp": SpringGraspOptimizer,
               "fc":   FCGPISGraspOptimizer}
 
+def set_wandb_config(project_name, conf, wandb_entity="clairec"):
+    wandb.require("service")
+    # Load or save wandb info
+    exp_dir = os.path.dirname(conf.npz_path)
+    wandb_info_path = os.path.join(exp_dir, "wandb_info.json")
+
+    # Create experiment name
+    today_date = date.today().strftime("%m-%d-%y")
+    timestamp = datetime.now().time().strftime("%H%M%S")
+    run_name = os.path.basename(exp_dir) + "_" + today_date + "_" + timestamp
+
+    wandb_id = wandb.util.generate_id()
+    wandb_info = {
+        "run_name": run_name,
+        "id": wandb_id,
+        "project": project_name,
+    }
+    with open(wandb_info_path, "w") as f:
+        json.dump(wandb_info, f, indent=4)
+
+    # wandb init
+    wandb.init(
+        project=project_name,
+        entity=wandb_entity,
+        name=wandb_info["run_name"],
+        id=wandb_info["id"],
+        config=conf,
+    )
+
+    # TODO save weight_config
+
+
 if __name__ == "__main__":
     from argparse import ArgumentParser
     import json
@@ -58,12 +92,37 @@ if __name__ == "__main__":
     parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
     parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
+    parser.add_argument("--log", "-l", action="store_true", help="Log optimization to wandb")
+
+    # Weights for loss terms
+    parser.add_argument("--w_sp", type=float, default=200, help="Weight for SpringGrasp cost")
+    parser.add_argument("--w_dist", type=float, default=10000, help="Weight for contact pos distance")
+    parser.add_argument("--w_uncer", type=float, default=20, help="Weight for uncertainty")
+    parser.add_argument("--w_gain", type=float, default=0.5, help="Weight for regularizing gains")
+    parser.add_argument("--w_tar", type=float, default=1000, help="Weight for target pos distance")
+    parser.add_argument("--w_col", type=float, default=1.0, help="Weight for penalizing collisions")
+    parser.add_argument("--w_reg", type=float, default=10.0, help="Weight for regularizing joint angles and fingertip postions")
+    parser.add_argument("--w_force", type=float, default=200.0, help="Weight for regularizing contact forces")
     args = parser.parse_args()
 
     if args.weight_config is not None:
         weight_config = json.load(open(f"weight_config/{args.weight_config}.json"))
     else:
-        weight_config = None
+        # Use default weights
+        weight_config = {
+            "w_sp": args.w_sp,
+            "w_dist": args.w_dist,
+            "w_tar": args.w_tar,
+            "w_uncer": args.w_uncer,
+            "w_gain": args.w_gain,
+            "w_col": args.w_col,
+            "w_reg": args.w_reg,
+            "w_force": args.w_force,
+        }
+    
+    # Set up wandb logging
+    if args.log and args.npz_path is not None:
+        set_wandb_config("springgrasp", args)
 
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file)
@@ -224,7 +283,8 @@ if __name__ == "__main__":
             mass=args.mass,
             com=center[:3],
             gravity=False,
-            weight_config=weight_config
+            weight_config=weight_config,
+            log=args.log,
         )
 
     # Get intial conditions

@@ -5,6 +5,7 @@ import time
 from functools import partial
 from differentiable_robot_model.robot_model import DifferentiableRobotModel
 from utils.math_utils import minimum_wrench_reward, euler_angles_to_matrix
+import wandb
 
 from .initial_guesses import *
 from .metric import *
@@ -627,7 +628,8 @@ class SpringGraspOptimizer:
         mass = 0.1,
         com = [0.0, 0.0, 0.0],
         num_samples = 10,
-        weight_config = None
+        weight_config = None,
+        log=False,
     ):
         """
         Initialize optimization parameters
@@ -654,6 +656,7 @@ class SpringGraspOptimizer:
             num_samples: number of points along contact neighborhood line segment
                 when computing uncertainty loss term
             weight_config: if specified, initial weights to use
+            log: if true, log to wandb
         """
         self.ref_q = torch.tensor(ref_q).to(device)
         self.robot_model = DifferentiableRobotModel(robot_urdf, device=device)
@@ -676,35 +679,25 @@ class SpringGraspOptimizer:
         self.com = com
         self.gravity = gravity
         self.num_samples = num_samples
-        # Different weights, shoudl load from config.
+
+        # If no weight_config specified, use defaults
         if weight_config is None:
-            self.w_sp = 200.0
-            self.w_dist = 10000.0
-            self.w_uncer = 20.0
-            self.w_gain = 0.5
-            self.w_tar = 1000.0
-            self.w_col = 1.0
-            self.w_reg = 10.0
-            self.w_force = 200.0
-        else:
-            self.w_sp = weight_config["w_sp"]
-            self.w_dist = weight_config["w_dist"]
-            self.w_uncer = weight_config["w_uncer"]
-            self.w_gain = weight_config["w_gain"]
-            self.w_tar = weight_config["w_tar"]
-            self.w_col = weight_config["w_col"]
-            self.w_reg = weight_config["w_reg"]
-            self.w_force = weight_config["w_force"]
+            weight_config = {
+                "w_sp": 200.0,
+                "w_dist": 10000.0,
+                "w_uncer": 20.0,
+                "w_gain": 0.5,
+                "w_tar": 1000.0,
+                "w_col": 1.0,
+                "w_reg": 10.0,
+                "w_force": 200.0,
+            }
+        self.weights = weight_config
+
+        self.log = log
         # Print out the weight configuration
         print("========Weight Configuration:========")
-        print("w_sp:", self.w_sp)
-        print("w_dist:", self.w_dist)
-        print("w_uncer:", self.w_uncer)
-        print("w_gain:", self.w_gain)
-        print("w_tar:", self.w_tar)
-        print("w_col:", self.w_col)
-        print("w_reg:", self.w_reg)
-        print("w_force:", self.w_force)
+        print(self.weights)
         print("=====================================")
 
     def forward_kinematics(self, joint_angles, palm_poses=None, link_names=None):
@@ -827,8 +820,12 @@ class SpringGraspOptimizer:
         tar_dist_cost = tar_dist.sum(dim=1) # E_tar: make target pos be inside object
 
         # Total loss
-        l = c * self.w_sp + dist_cost * self.w_dist + tar_dist_cost * self.w_tar + \
-            force_cost * self.w_force + reg_cost * self.w_reg + self.w_gain * compliance.sum(dim=1)
+        l = c * self.weights["w_sp"] + \
+            dist_cost * self.weights["w_dist"] + \
+            tar_dist_cost * self.weights["w_tar"] + \
+            force_cost * self.weights["w_force"] + \
+            reg_cost * self.weights["w_reg"] + \
+            self.weights["w_gain"] * compliance.sum(dim=1)
         #print("All costs:", float(c.mean()), float(dist_cost.mean()), float(tar_dist_cost.mean()), float(center_cost.mean()), float(force_cost.mean()), float(ref_cost.mean()), float(variance_cost.mean()), float(reg_cost.mean()))
         return l, margin, R, t, contact_prob
 
@@ -885,7 +882,7 @@ class SpringGraspOptimizer:
         contact_prob = (contact_prob.unsqueeze(2) / normalization_factor).unsqueeze(1) # [num_envs, 1, 4, 1]
         total_prominence = (contact_prob - sample_prob).sum(dim=1).squeeze(-1) # [num_envs, 4]
         prominence_loss = total_prominence.sum(dim=1) # NOTE: Variance loss
-        total_loss = -prominence_loss * self.w_uncer # NOTE: Variance loss
+        total_loss = -prominence_loss * self.weights["w_uncer"] # NOTE: Variance loss
 
         # Add task loss
         total_loss += task_loss
@@ -911,9 +908,9 @@ class SpringGraspOptimizer:
                                                                                   "link_9.0", "link_10.0", "link_11.0"])
         link_dist,_ = gpis.pred(link_pos)
         link_dist_loss = (1/link_dist).sum(dim=1) * 0.01
-        total_loss += link_dist_loss * self.w_col
+        total_loss += link_dist_loss * self.weights["w_col"]
         
-        total_loss += self.compute_collision_loss(joint_angles, palm_posori) * self.w_col
+        total_loss += self.compute_collision_loss(joint_angles, palm_posori) * self.weights["w_col"]
         self.total_loss = total_loss
         loss = total_loss.sum() # TODO: TO BE FINISHED
         loss.backward()
@@ -980,6 +977,11 @@ class SpringGraspOptimizer:
                     gpis,
                     num_envs
                 )
+            if self.log:
+                log_dict = {
+                    "total_loss": self.total_loss.mean()
+                }
+                log_to_wandb(log_dict, epoch=s)
             if verbose:
                 print(f"Step {s} Loss:",float(self.total_loss.mean()))
             if torch.isnan(self.total_loss.sum()):
@@ -1002,4 +1004,29 @@ class SpringGraspOptimizer:
         print("Optimization time:", time.time() - start_ts)
         print("Margin:",opt_margin)
         return opt_joint_angle, opt_compliance, opt_target_pose, opt_palm_poses, opt_margin, opt_R, opt_t
-            
+    
+def log_to_wandb(log_dict_in, epoch=None):
+    """
+    Log to wandb
+
+    Args:
+        log_dict_in is a dict that can have up to one sub dict for each wandb panel
+            example:
+                {
+                    "set_name": {"total_loss": 1},
+                    "lr": 1e-4
+                }
+        epoch (int): epoch number
+    """
+
+    log_dict = {}
+    for k, v in log_dict_in.items():
+        if isinstance(v, dict):
+            for k_sub, v_sub in v.items():
+                log_dict[f"{k}/{k_sub}"] = v_sub
+        else:
+            log_dict[k] = v
+    if epoch is not None:
+        log_dict["epoch"] = epoch
+    wandb.log(log_dict)
+        
