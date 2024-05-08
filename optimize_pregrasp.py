@@ -103,6 +103,8 @@ if __name__ == "__main__":
     parser.add_argument("--w_col", type=float, default=1.0, help="Weight for penalizing collisions")
     parser.add_argument("--w_reg", type=float, default=10.0, help="Weight for regularizing joint angles and fingertip postions")
     parser.add_argument("--w_force", type=float, default=200.0, help="Weight for regularizing contact forces")
+    parser.add_argument("--w_pre_dist", type=float, default=50.0, help="Weight for pre-grasp finertip pos")
+    parser.add_argument("--w_palm_dist", type=float, default=1.0, help="Weight for palm to obj distance")
     args = parser.parse_args()
 
     if args.weight_config is not None:
@@ -118,6 +120,8 @@ if __name__ == "__main__":
             "w_col": args.w_col,
             "w_reg": args.w_reg,
             "w_force": args.w_force,
+            "w_pre_dist": args.w_pre_dist,
+            "w_palm_dist": args.w_palm_dist,
         }
     
     # Set up wandb logging

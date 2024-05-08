@@ -691,8 +691,24 @@ class SpringGraspOptimizer:
                 "w_col": 1.0,
                 "w_reg": 10.0,
                 "w_force": 200.0,
+                "w_pre_dist": 50.0,
+                "w_palm_dist": 1.0,
             }
         self.weights = weight_config
+
+        self.total_loss = np.nan
+        self.losses = {
+            "loss_sp": np.nan,
+            "loss_dist" : np.nan,
+            "loss_uncer": np.nan,
+            "loss_gain": np.nan,
+            "loss_tar": np.nan,
+            "loss_col": np.nan,
+            "loss_reg": np.nan,
+            "loss_force": np.nan,
+            "loss_pre_dist": np.nan,
+            "loss_palm_dist": np.nan,
+        }
 
         self.log = log
         # Print out the weight configuration
@@ -819,13 +835,22 @@ class SpringGraspOptimizer:
         dist_cost = torch.abs(dist).sum(dim=1) # E_dist: make contact pos be on object surface
         tar_dist_cost = tar_dist.sum(dim=1) # E_tar: make target pos be inside object
 
+        # Fill loss dict
+        self.losses["loss_sp"] = c * self.weights["w_sp"]
+        self.losses["loss_dist"] = dist_cost * self.weights["w_dist"]
+        self.losses["loss_tar"] = tar_dist_cost * self.weights["w_tar"]
+        self.losses["loss_force"] = force_cost * self.weights["w_force"]
+        self.losses["loss_reg"] = reg_cost * self.weights["w_reg"]
+        self.losses["loss_gain"] = self.weights["w_gain"] * compliance.sum(dim=1)
+
         # Total loss
-        l = c * self.weights["w_sp"] + \
-            dist_cost * self.weights["w_dist"] + \
-            tar_dist_cost * self.weights["w_tar"] + \
-            force_cost * self.weights["w_force"] + \
-            reg_cost * self.weights["w_reg"] + \
-            self.weights["w_gain"] * compliance.sum(dim=1)
+        l = self.losses["loss_sp"] + \
+            self.losses["loss_dist"] + \
+            self.losses["loss_tar"] + \
+            self.losses["loss_force"] + \
+            self.losses["loss_reg"] + \
+            self.losses["loss_gain"]
+
         #print("All costs:", float(c.mean()), float(dist_cost.mean()), float(tar_dist_cost.mean()), float(center_cost.mean()), float(force_cost.mean()), float(ref_cost.mean()), float(variance_cost.mean()), float(reg_cost.mean()))
         return l, margin, R, t, contact_prob
 
@@ -882,15 +907,11 @@ class SpringGraspOptimizer:
         contact_prob = (contact_prob.unsqueeze(2) / normalization_factor).unsqueeze(1) # [num_envs, 1, 4, 1]
         total_prominence = (contact_prob - sample_prob).sum(dim=1).squeeze(-1) # [num_envs, 4]
         prominence_loss = total_prominence.sum(dim=1) # NOTE: Variance loss
-        total_loss = -prominence_loss * self.weights["w_uncer"] # NOTE: Variance loss
+        self.losses["loss_uncer"] = -prominence_loss * self.weights["w_uncer"] # NOTE: Variance loss
 
-        # Add task loss
-        total_loss += task_loss
-
-        # TODO ??
+        # Loss for pre-grasp fingetip position distances
         pre_dist, _ = gpis.pred(self.pregrasp_tip_pose)
-        pre_dist_loss = -pre_dist.sum(dim=1) * 50.0 # NOTE: Experimental
-        total_loss += pre_dist_loss # Ignored for now
+        self.losses["loss_pre_dist"] = -pre_dist.sum(dim=1) * self.weights["w_pre_dist"] # NOTE: Experimental
 
         # Collision loss terms
 
@@ -899,8 +920,10 @@ class SpringGraspOptimizer:
             palm_dist,_ = gpis.pred(palm_poses)
             palm_dist = palm_dist
             palm_dist_loss = 1/palm_dist # Need to ensure palm is outside the object.
-            total_loss += palm_dist_loss
+            self.losses["loss_palm_dist"] = palm_dist_loss
             #print("palm dist:", float(palm_dist.mean()))
+        else:
+            self.losses["loss_palm_dist"] = 0
 
         # Hand object collision loss
         link_pos = self.forward_kinematics(joint_angles, palm_posori, link_names=["link_1.0", "link_2.0", "link_3.0",
@@ -908,10 +931,15 @@ class SpringGraspOptimizer:
                                                                                   "link_9.0", "link_10.0", "link_11.0"])
         link_dist,_ = gpis.pred(link_pos)
         link_dist_loss = (1/link_dist).sum(dim=1) * 0.01
-        total_loss += link_dist_loss * self.weights["w_col"]
-        
-        total_loss += self.compute_collision_loss(joint_angles, palm_posori) * self.weights["w_col"]
+
+        self.losses["loss_col"] = self.weights["w_col"] * (link_dist_loss + self.compute_collision_loss(joint_angles, palm_posori))
+
+        # Compute total loss
+        total_loss = 0
+        for k, loss_val in self.losses.items():
+            total_loss += loss_val
         self.total_loss = total_loss
+
         loss = total_loss.sum() # TODO: TO BE FINISHED
         loss.backward()
         return loss
@@ -977,15 +1005,7 @@ class SpringGraspOptimizer:
                     gpis,
                     num_envs
                 )
-            if self.log:
-                log_dict = {
-                    "total_loss": self.total_loss.mean()
-                }
-                log_to_wandb(log_dict, epoch=s)
-            if verbose:
-                print(f"Step {s} Loss:",float(self.total_loss.mean()))
-            if torch.isnan(self.total_loss.sum()):
-                print("NaN detected:", self.pregrasp_tip_pose, self.total_margin)
+
             with torch.no_grad():
                 update_flag = self.total_loss < opt_value
                 if update_flag.sum() and s>20:
@@ -1001,6 +1021,19 @@ class SpringGraspOptimizer:
                 self.optim.step()
             with torch.no_grad():
                 compliance.clamp_(min=40.0) # prevent negative compliance
+
+            # End of epoch bookkeeping
+            if self.log:
+                # Log individual losses and total loss
+                log_dict = {"total_loss": self.total_loss.mean()}
+                for k, loss_val in self.losses.items():
+                    log_dict[k] = loss_val.mean()
+                log_to_wandb(log_dict, epoch=s)
+            if verbose:
+                print(f"Step {s} Loss:",float(self.total_loss.mean()))
+            if torch.isnan(self.total_loss.sum()):
+                print("NaN detected:", self.pregrasp_tip_pose, self.total_margin)
+
         print("Optimization time:", time.time() - start_ts)
         print("Margin:",opt_margin)
         return opt_joint_angle, opt_compliance, opt_target_pose, opt_palm_poses, opt_margin, opt_R, opt_t
