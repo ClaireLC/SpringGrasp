@@ -7,6 +7,8 @@ import json
 
 import spring_grasp_planner.func_metrics as f_metrics
 
+device = "cpu"
+
 def main(args):
     grasp_dict = np.load(args.grasp_path, allow_pickle=True)["data"].item() 
 
@@ -26,37 +28,57 @@ def main(args):
 
     # Load affordance labels from input path 
     input_dict = np.load(grasp_dict["input_path"], allow_pickle=True)["data"].item()
-    aff_labels = input_dict["aff_labels"]
-    pts = input_dict["pts_wf"]
+    aff_labels = torch.tensor(input_dict["aff_labels"]).to(device)
+    pts = torch.tensor(input_dict["pts_wf"]).to(device)
 
     # Load GPIS
     gpis_path = os.path.join(os.path.dirname(args.grasp_path), "gpis.pt")
     gpis = torch.load(gpis_path)
     print("Loaded GPIS")
 
-    # Iterate through grasps in grasp_path.npz
-    cost_list = []
-    for grasp_i in grasps_to_eval:
-        print("Grasp", grasp_i)
+    # Score a batch of grasps
+    init_ftip_pos = torch.tensor(grasp_dict["start_tip_pose"][grasps_to_eval]).to(device).double()
+    batch_size = init_ftip_pos.shape[0]
+    pts_batched = pts.repeat(batch_size, 1, 1) # [B, N, 3]
+    aff_labels_batched = aff_labels.repeat(batch_size, 1) # [B, N]
+    cost = f_metrics.contactgrasp_metric(
+        gpis,
+        pts_batched,
+        init_ftip_pos,
+        aff_labels_batched,
+        w_pos=args.w_pos,
+        w_neg=args.w_neg,
+        dp_thresh=args.dp_thresh,
+        dist_to_use=args.dist,
+        debug=args.debug,
+    )
+    print(-cost)
+    quit()
 
-        init_ftip_pos = grasp_dict["start_tip_pose"][grasp_i]
-        target_ftip_pos = grasp_dict["target_tip_pose"][grasp_i]
-        palm_pose = grasp_dict["palm_pose"][grasp_i]
+    ## Score one grasp at a time (unbatched)
+    ## Iterate through grasps in grasp_path.npz
+    #cost_list = []
+    #for grasp_i in grasps_to_eval:
+    #    print("Grasp", grasp_i)
 
-        cost = f_metrics.contactgrasp_metric(
-            gpis,
-            pts,
-            init_ftip_pos,
-            aff_labels,
-            w_pos=args.w_pos,
-            w_neg=args.w_neg,
-            dp_thresh=args.dp_thresh,
-            dist_to_use=args.dist,
-            debug=args.debug,
-        )
-        print("cost", cost)
-        cost_list.append(-1 * cost) # Negate cost for logging/plotting
-    print(cost_list)
+    #    init_ftip_pos = grasp_dict["start_tip_pose"][grasp_i]
+    #    target_ftip_pos = grasp_dict["target_tip_pose"][grasp_i]
+    #    palm_pose = grasp_dict["palm_pose"][grasp_i]
+
+    #    cost = f_metrics.contactgrasp_metric(
+    #        gpis,
+    #        pts,
+    #        init_ftip_pos,
+    #        aff_labels,
+    #        w_pos=args.w_pos,
+    #        w_neg=args.w_neg,
+    #        dp_thresh=args.dp_thresh,
+    #        dist_to_use=args.dist,
+    #        debug=args.debug,
+    #    )
+    #    print("cost", cost)
+    #    cost_list.append(-1 * cost) # Negate cost for logging/plotting
+    #print(cost_list)
     
 
 if __name__ == "__main__":
