@@ -94,7 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
     parser.add_argument("--log", "-l", action="store_true", help="Log optimization to wandb")
 
-    # Weights for loss terms
+    # Weights for loss terms - original SpringGrasp
     parser.add_argument("--w_sp", type=float, default=200, help="Weight for SpringGrasp cost")
     parser.add_argument("--w_dist", type=float, default=10000, help="Weight for contact pos distance")
     parser.add_argument("--w_uncer", type=float, default=20, help="Weight for uncertainty")
@@ -105,6 +105,16 @@ if __name__ == "__main__":
     parser.add_argument("--w_force", type=float, default=200.0, help="Weight for regularizing contact forces")
     parser.add_argument("--w_pre_dist", type=float, default=50.0, help="Weight for pre-grasp finertip pos")
     parser.add_argument("--w_palm_dist", type=float, default=1.0, help="Weight for palm to obj distance")
+
+    # Functional grasp params
+    parser.add_argument("--w_func", type=float, default=0.0, help="Weight for functional grasp term")
+    #parser.add_argument("--func_metric_name", type=str, choices=["contactgrasp"], help="Name of functional grasp metric to use")
+    #parser.add_argument("--func_contactgrasp_dist")
+    #parser.add_argument("--func_contactgrasp_w_pos")
+    #parser.add_argument("--func_contactgrasp_w_neg")
+    #parser.add_argument("--func_contactgrasp_dp_thresh")
+
+
     args = parser.parse_args()
 
     if args.weight_config is not None:
@@ -122,6 +132,7 @@ if __name__ == "__main__":
             "w_force": args.w_force,
             "w_pre_dist": args.w_pre_dist,
             "w_palm_dist": args.w_palm_dist,
+            "w_func": args.w_func,
         }
     
     # Set up wandb logging
@@ -135,6 +146,8 @@ if __name__ == "__main__":
         WRIST_OFFSET[:,1] += center[1]
         WRIST_OFFSET[:,2] += 2 * center[2]
         init_wrist_poses = WRIST_OFFSET
+        input_pts = None
+        aff_labels = None
     elif args.npz_path is not None:
         input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
         pcd = o3d.geometry.PointCloud()
@@ -142,6 +155,12 @@ if __name__ == "__main__":
         #init_wrist_poses = init_cond.get_default_wrist_pose(pcd)
         init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
         center = pcd.get_axis_aligned_bounding_box().get_center()
+        
+        input_pts = torch.tensor(input_dict["pts_wf"]).to(device).double()
+        if "aff_labels" in input_dict:
+            aff_labels = torch.tensor(input_dict["aff_labels"]).to(device).double()
+        else:
+            aff_labels = None
     else:
         pcd = o3d.io.read_point_cloud("data/obj_cropped.ply")
         center = pcd.get_axis_aligned_bounding_box().get_center()
@@ -149,6 +168,8 @@ if __name__ == "__main__":
         WRIST_OFFSET[:,1] += center[1]
         WRIST_OFFSET[:,2] += 2 * center[2]
         init_wrist_poses = WRIST_OFFSET
+        input_pts = None
+        aff_labels = None
     
     # GPIS formulation - load or fit
     gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
@@ -328,7 +349,16 @@ if __name__ == "__main__":
 
     # Run optimization
     if args.mode == "sp":
-        opt_joint_angles, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_R, opt_t = grasp_optimizer.optimize(init_joint_angles,target_pose, compliance, friction_mu, gpis, verbose=True)
+        opt_joint_angles, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_R, opt_t = grasp_optimizer.optimize(
+            init_joint_angles,
+            target_pose,
+            compliance,
+            friction_mu,
+            gpis,
+            pts=input_pts,
+            aff_labels=aff_labels,
+            verbose=True,
+        )
         opt_tip_pose = grasp_optimizer.forward_kinematics(opt_joint_angles, opt_palm_pose)
     elif args.mode == "fc":
         opt_tip_pose, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_joint_angles = grasp_optimizer.optimize(init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True)

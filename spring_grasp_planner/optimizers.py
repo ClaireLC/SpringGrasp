@@ -9,6 +9,7 @@ import wandb
 
 from .initial_guesses import *
 from .metric import *
+import spring_grasp_planner.func_metrics as f_metrics
 
 device = torch.device("cpu")
 
@@ -693,9 +694,11 @@ class SpringGraspOptimizer:
                 "w_force": 200.0,
                 "w_pre_dist": 50.0,
                 "w_palm_dist": 1.0,
+                "w_func": 0.0,
             }
         self.weights = weight_config
 
+        # Initialize loss variables
         self.total_loss = np.nan
         self.losses = {
             "loss_sp": np.nan,
@@ -708,6 +711,7 @@ class SpringGraspOptimizer:
             "loss_force": np.nan,
             "loss_pre_dist": np.nan,
             "loss_palm_dist": np.nan,
+            "loss_func": np.nan,
         }
 
         self.log = log
@@ -854,7 +858,19 @@ class SpringGraspOptimizer:
         #print("All costs:", float(c.mean()), float(dist_cost.mean()), float(tar_dist_cost.mean()), float(center_cost.mean()), float(force_cost.mean()), float(ref_cost.mean()), float(variance_cost.mean()), float(reg_cost.mean()))
         return l, margin, R, t, contact_prob
 
-    def closure(self, joint_angles, compliance, target_pose, palm_poses, palm_oris, friction_mu, gpis, num_envs):
+    def closure(
+        self,
+        joint_angles,
+        compliance,
+        target_pose,
+        palm_poses,
+        palm_oris,
+        friction_mu,
+        gpis,
+        num_envs,
+        pts=None,
+        aff_labels=None,
+    ):
         """
         Compute total loss
 
@@ -866,6 +882,9 @@ class SpringGraspOptimizer:
             palm_oris: palm orientations
             friction_mu: friction coefficients
             gpis: GPIS of object
+            num_envs: number of initial conditions
+            pts: object point cloud [N, 3]
+            aff_labels: affordance labels [N,]
         """
         self.optim.zero_grad()
         palm_posori = torch.hstack([palm_poses, palm_oris])
@@ -882,7 +901,7 @@ class SpringGraspOptimizer:
 
         # Compute task loss (E_sp, E_dist, E_gain, E_tar, E_reg)
         # contact_prob: probability of contact at all_tip_pose (contact pos)
-        l, margin, R, t, contact_prob = self.compute_loss(
+        task_loss, margin, R, t, contact_prob = self.compute_loss(
             all_tip_pose, # [num_envs*num_coeffs, 4, 3]
             joint_angles.repeat(len(self.pregrasp_coefficients), 1), 
             target_pose_extended, 
@@ -891,7 +910,6 @@ class SpringGraspOptimizer:
             gpis,
         )
         self.R, self.t = R, t
-        task_loss = l
         self.total_margin = (self.pregrasp_weights.view(-1,1,1) * margin.view(-1, num_envs, 4)).sum(dim=0)
 
         # Compute E_uncer (Eqn. (10))
@@ -914,7 +932,6 @@ class SpringGraspOptimizer:
         self.losses["loss_pre_dist"] = -pre_dist.sum(dim=1) * self.weights["w_pre_dist"] # NOTE: Experimental
 
         # Collision loss terms
-
         # Palm to object distance
         if self.optimize_palm:
             palm_dist,_ = gpis.pred(palm_poses)
@@ -924,7 +941,6 @@ class SpringGraspOptimizer:
             #print("palm dist:", float(palm_dist.mean()))
         else:
             self.losses["loss_palm_dist"] = 0
-
         # Hand object collision loss
         link_pos = self.forward_kinematics(joint_angles, palm_posori, link_names=["link_1.0", "link_2.0", "link_3.0",
                                                                                   "link_5.0", "link_6.0", "link_7.0",
@@ -933,6 +949,24 @@ class SpringGraspOptimizer:
         link_dist_loss = (1/link_dist).sum(dim=1) * 0.01
 
         self.losses["loss_col"] = self.weights["w_col"] * (link_dist_loss + self.compute_collision_loss(joint_angles, palm_posori))
+
+        # TODO add functional grasping loss
+        if pts is not None and aff_labels is not None:
+            pts_batched = pts.repeat(num_envs, 1, 1) # [N, 3] --> [num_envs, N, 3]
+            aff_labels_batched = aff_labels.repeat(num_envs, 1) # [N] --> [num_envs, N]
+            func_cost = f_metrics.contactgrasp_metric(
+                gpis,
+                pts_batched,
+                pregrasp_tip_pose_extended,  # [num_envs, 4, 3]
+                aff_labels_batched,
+                w_pos=1,
+                w_neg=1,
+                dp_thresh=0.9,
+                dist_to_use="euclidean",
+            )
+            self.losses["loss_func"] = func_cost * self.weights["w_func"]
+        else:
+            self.losses["loss_func"] = 0
 
         # Compute total loss
         total_loss = 0
@@ -944,7 +978,17 @@ class SpringGraspOptimizer:
         loss.backward()
         return loss
 
-    def optimize(self, init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True):
+    def optimize(
+        self,
+        init_joint_angles,
+        target_pose,
+        compliance,
+        friction_mu,
+        gpis,
+        pts=None,
+        aff_labels=None,
+        verbose=True,
+    ):
         """
         Solve optimization problem
 
@@ -992,7 +1036,9 @@ class SpringGraspOptimizer:
                     palm_oris=palm_oris, 
                     friction_mu=friction_mu, 
                     gpis=gpis,
-                    num_envs=num_envs
+                    num_envs=num_envs,
+                    pts=pts,
+                    aff_labels=aff_labels,
                 ))
             else:
                 loss = self.closure(
@@ -1003,7 +1049,9 @@ class SpringGraspOptimizer:
                     palm_oris,
                     friction_mu,
                     gpis,
-                    num_envs
+                    num_envs,
+                    pts=pts,
+                    aff_labels=aff_labels,
                 )
 
             with torch.no_grad():
