@@ -43,7 +43,9 @@
       </geometry>
     </collision>
     <inertial>
-      <origin rpy="0 0 0" xyz="0 0 0.0475"/>
+      <!-- Matches URDF used for robot controller?-->
+      <origin rpy="0 0 0" xyz="0 0 0.0"/>
+      <!--<origin rpy="0 0 0" xyz="0 0 0.0475"/>-->
       <mass value="0.4154"/>
       <inertia ixx="1e-4" ixy="0.0" ixz="0.0" iyy="1e-4" iyz="0.0" izz="1e-4"/>
     </inertial>
