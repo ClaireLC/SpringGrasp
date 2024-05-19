@@ -172,7 +172,10 @@ if __name__ == "__main__":
         aff_labels = None
     
     # GPIS formulation - load or fit
-    gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
+    if args.npz_path is not None:
+        gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
+    else:
+        gpis_save_path = None
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
     if os.path.exists(gpis_save_path):
         # Load
@@ -250,12 +253,13 @@ if __name__ == "__main__":
                 "bound": bound,
                 "center": center,
             }
-            save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.npz")
-            print("Saving GPIS results to:", save_path)
-            np.savez_compressed(save_path, data=gpis_dict)
-            save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.ply")
-            print("Saving GPIS viz pcd to:", save_path)
-            o3d.io.write_point_cloud(save_path, fitted_pcd)  
+            if args.npz_path is not None:
+                save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.npz")
+                print("Saving GPIS results to:", save_path)
+                np.savez_compressed(save_path, data=gpis_dict)
+                save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.ply")
+                print("Saving GPIS viz pcd to:", save_path)
+                o3d.io.write_point_cloud(save_path, fitted_pcd)  
         quit()
 
     init_tip_pose = torch.tensor([[[0.05,0.05, 0.02],[0.06,-0.0, -0.01],[0.03,-0.04,0.0],[-0.07,-0.01, 0.02]]]).double().to(device)
