@@ -23,9 +23,14 @@ def get_default_wrist_pose(pcd):
 
     return WRIST_OFFSET
 
-def get_init_wrist_pose_from_pcd(pcd, viz=False):
+def get_init_wrist_pose_from_pcd(pcd, viz=False, num_xy_offset=1):
     """
     Get initial wrist poses
+
+    args:
+        pcd: input point cloud
+        viz: if True, show debug prints and visualizations
+        num_xy_offset: number of offsets to use along the x and y axes of the wrist frame
 
     returns:
         wrist_poses (np.array): [B, 6] array of B wrist poses
@@ -45,9 +50,13 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False):
     normal_dirs_list = [1, -1]
     base_x_rot_list = [0] # degrees
     base_y_rot_list = [0] # degrees
-    base_z_rot_list = np.linspace(-180, 180, 25) # degrees
+    num_z_rot = 25 # 15 degree increments
+    num_z_rot = 13 # 30 degree increments
+    num_z_rot = 9  # 45 degree increments
+    num_z_rot = 5  # 90 degree increments
+    base_z_rot_list = np.linspace(-180, 180, num_z_rot) # degrees
 
-    xy_offset_list = np.linspace(0, max(extent)/2., num=3)[1:]
+    xy_offset_list = np.linspace(0, max(extent)/2., num=num_xy_offset+1)[1:]
     xy_axes = [np.array([1, 0, 0]), np.array([0, 1, 0])]
 
     # TODO perturb pos randomly in all dimensions
@@ -88,28 +97,29 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False):
             v_utils.vis_wrist_pose(pcd, pose, draw_frame=True)
 
         # Translate along x and y axes
-        for trans_params in itertools.product(
-            xy_axes, xy_offset_list, normal_dirs_list,
-        ):
-            axis = trans_params[0]
-            xy_offset = trans_params[1]
-            trans_dir = trans_params[2]
-            H_robot_to_world = np.zeros((4,4))
-            H_robot_to_world[:3, :3] = base_r.as_matrix()
-            H_robot_to_world[:3, 3] = base_pos
-            H_robot_to_world[3, 3] = 1
-            pos_rf = xy_offset * axis * trans_dir # Pos in local frame
-            pos = (H_robot_to_world @ np.append(pos_rf, 1))[:3]
+        if num_xy_offset > 0:
+            for trans_params in itertools.product(
+                xy_axes, xy_offset_list, normal_dirs_list,
+            ):
+                axis = trans_params[0]
+                xy_offset = trans_params[1]
+                trans_dir = trans_params[2]
+                H_robot_to_world = np.zeros((4,4))
+                H_robot_to_world[:3, :3] = base_r.as_matrix()
+                H_robot_to_world[:3, 3] = base_pos
+                H_robot_to_world[3, 3] = 1
+                pos_rf = xy_offset * axis * trans_dir # Pos in local frame
+                pos = (H_robot_to_world @ np.append(pos_rf, 1))[:3]
 
-            # Create and append pose to list
-            if viz:
-                print(f"  Pose {len(wrist_poses)} xy offset from base pos:", pos_rf)
-            pose = np.concatenate((pos, XYZ_ori))
-            wrist_poses.append(pose)
+                # Create and append pose to list
+                if viz:
+                    print(f"  Pose {len(wrist_poses)} xy offset from base pos:", pos_rf)
+                pose = np.concatenate((pos, XYZ_ori))
+                wrist_poses.append(pose)
 
-            # Visualize local wrist frame
-            if viz:
-                v_utils.vis_wrist_pose(pcd, pose, draw_frame=True)
+                # Visualize local wrist frame
+                if viz:
+                    v_utils.vis_wrist_pose(pcd, pose, draw_frame=True)
     return np.array(wrist_poses)
 
 def get_start_and_target_ftip_pos(wrist_poses, joint_angles, optimizer, device):
