@@ -630,7 +630,7 @@ class SpringGraspOptimizer:
         com = [0.0, 0.0, 0.0],
         num_samples = 10,
         weight_config = None,
-        log=False,
+        conf=None,
     ):
         """
         Initialize optimization parameters
@@ -657,7 +657,7 @@ class SpringGraspOptimizer:
             num_samples: number of points along contact neighborhood line segment
                 when computing uncertainty loss term
             weight_config: if specified, initial weights to use
-            log: if true, log to wandb
+            conf: args from optimization_pregrasp.py
         """
         self.ref_q = torch.tensor(ref_q).to(device)
         self.robot_model = DifferentiableRobotModel(robot_urdf, device=device)
@@ -714,7 +714,8 @@ class SpringGraspOptimizer:
             "loss_func": np.nan,
         }
 
-        self.log = log
+        self.conf = conf
+        self.log = self.conf.log
         # Print out the weight configuration
         print("========Weight Configuration:========")
         print(self.weights)
@@ -950,23 +951,37 @@ class SpringGraspOptimizer:
 
         self.losses["loss_col"] = self.weights["w_col"] * (link_dist_loss + self.compute_collision_loss(joint_angles, palm_posori))
 
-        # TODO add functional grasping loss
-        if pts is not None and aff_labels is not None:
+        # Compute functional grasp loss term
+        if self.conf.func_metric_name is not None:
+            if pts is None: raise ValueError(
+                "Cannot compute functional grasp loss. No input points provided."
+            )
+            if aff_labels is None: raise ValueError(
+                "Cannot compute functional graps loss. No affordance labels provided."
+            )
+
             pts_batched = pts.repeat(num_envs, 1, 1) # [N, 3] --> [num_envs, N, 3]
             aff_labels_batched = aff_labels.repeat(num_envs, 1) # [N] --> [num_envs, N]
-            func_cost = f_metrics.contactgrasp_metric(
-                gpis,
-                pts_batched,
-                pregrasp_tip_pose_extended,  # [num_envs, 4, 3]
-                aff_labels_batched,
-                w_pos=1,
-                w_neg=1,
-                dp_thresh=0.9,
-                dist_to_use="euclidean",
-            )
+
+            if self.conf.func_metric_name == "contactgrasp":
+                func_cost = f_metrics.contactgrasp_metric(
+                    gpis,
+                    pts_batched,
+                    pregrasp_tip_pose_extended,  # [num_envs, 4, 3]
+                    aff_labels_batched,
+                    w_pos=self.conf.func_contactgrasp_w_pos,
+                    w_neg=self.conf.func_contactgrasp_w_neg,
+                    dp_thresh=self.conf.func_contactgrasp_dp_thresh,
+                    dist_to_use=self.conf.func_contactgrasp_dist,
+                )
+            else:
+                raise ValueError(
+                    f"{self.conf.func_metric_name} is not a valid functional grasp metric name"
+                )
+
             self.losses["loss_func"] = func_cost * self.weights["w_func"]
         else:
-            self.losses["loss_func"] = 0
+            self.losses["loss_func"] = torch.zeros(self.losses["loss_col"].shape)
 
         # Compute total loss
         total_loss = 0
