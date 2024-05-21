@@ -42,17 +42,72 @@ def vis_grasp(tip_pose, target_pose):
 
 optimizers = {"sp": SpringGraspOptimizer,
               "fc":   FCGPISGraspOptimizer}
-
-def set_wandb_config(project_name, conf, wandb_entity="clairec"):
-    wandb.require("service")
-    # Load or save wandb info
-    exp_dir = os.path.dirname(conf.npz_path)
-    wandb_info_path = os.path.join(exp_dir, "wandb_info.json")
-
-    # Create experiment name
+            
+def get_run_name(conf, with_scene_name=False):
     today_date = date.today().strftime("%m-%d-%y")
     timestamp = datetime.now().time().strftime("%H%M%S")
-    run_name = os.path.basename(exp_dir) + "_" + today_date + "_" + timestamp
+
+    if args.npz_path is not None:
+        obj_name = os.path.basename(os.path.dirname((os.path.dirname(args.npz_path))))
+        pos_name = os.path.basename((os.path.dirname(args.npz_path)))
+        scene_name = obj_name + "_" + pos_name
+    else:
+        scene_name = args.exp_name
+
+    if with_scene_name:
+        run_name = scene_name
+    else:
+        run_name = "opt"
+
+    # Add conf params to name
+    params_to_add = [
+        "func_metric_name",
+        "w_func",
+        "func_contactgrasp_dist",
+        "func_contactgrasp_w_pos",
+        "func_contactgrasp_w_neg",
+        "func_contactgrasp_dp_thresh",
+    ]
+    
+    conf_dict = vars(conf)
+    for key in params_to_add:
+        val = conf_dict[key]
+        if isinstance(val, list):
+            val_str = "-".join([str(i) for i in val]).replace(".", "p")
+        elif type(val) == float:
+            val_str = str(val).replace(".", "p")
+        else:
+            val_str = str(val)
+
+        if key in [
+            "pretrained_pointnet_dir",
+        ]:
+            if val_str.lower() != "none":
+                val_str = "true"
+
+        # abbreviate key
+        splits = key.split("_")
+        short_key = ""
+
+        for split in splits:
+            short_key += split[0]
+    
+        run_name += f"_{short_key}-{val_str}"
+
+    run_name += ("_" + today_date + "_" + timestamp)
+
+    return run_name
+
+
+def set_wandb_config(project_name, run_name, conf, wandb_entity="clairec"):
+    """
+    Set up wandb logging
+    """
+
+    wandb.require("service")
+    # Load or save wandb info
+    exp_dir = os.path.dirname(conf["npz_path"])
+    wandb_info_path = os.path.join(exp_dir, "wandb_info.json")
 
     wandb_id = wandb.util.generate_id()
     wandb_info = {
@@ -72,12 +127,16 @@ def set_wandb_config(project_name, conf, wandb_entity="clairec"):
         config=conf,
     )
 
-    # TODO save weight_config
 
+def set_seeds():
+    np.random.seed(0)
+    torch.manual_seed(0)
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
     import json
+
+    set_seeds()
 
     parser = ArgumentParser()
     parser.add_argument("--num_iters", type=int, default=200)
@@ -89,6 +148,7 @@ if __name__ == "__main__":
     parser.add_argument("--friction", type=float, default=1.0)
     parser.add_argument("--vis_gpis", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
+
     parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
     parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
@@ -108,11 +168,11 @@ if __name__ == "__main__":
 
     # Functional grasp params
     parser.add_argument("--w_func", type=float, default=0.0, help="Weight for functional grasp term")
-    #parser.add_argument("--func_metric_name", type=str, choices=["contactgrasp"], help="Name of functional grasp metric to use")
-    #parser.add_argument("--func_contactgrasp_dist")
-    #parser.add_argument("--func_contactgrasp_w_pos")
-    #parser.add_argument("--func_contactgrasp_w_neg")
-    #parser.add_argument("--func_contactgrasp_dp_thresh")
+    parser.add_argument("--func_metric_name", type=str, choices=["contactgrasp"], help="Name of functional grasp metric to use")
+    parser.add_argument("--func_contactgrasp_dist", type=str, choices=["gpis", "euclidean"], default="euclidean")
+    parser.add_argument("--func_contactgrasp_w_pos", type=float, default=1.0, help="Weight for positive points")
+    parser.add_argument("--func_contactgrasp_w_neg", type=float, default=1.0, help="Weight for negative points")
+    parser.add_argument("--func_contactgrasp_dp_thresh", type=float, default=0.9)
 
 
     args = parser.parse_args()
@@ -135,9 +195,22 @@ if __name__ == "__main__":
             "w_func": args.w_func,
         }
     
+    # Create run directory to log optimization results
+    run_dir_name = get_run_name(args)
+    run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
+    if not os.path.exists(run_dir): os.makedirs(run_dir)
+
     # Set up wandb logging
+    run_name = get_run_name(args, with_scene_name=True)
+    args_dict = vars(args)
+    args_dict["run_dir"] = run_dir # Save run_dir to wandb log
     if args.log and args.npz_path is not None:
-        set_wandb_config("springgrasp", args)
+        set_wandb_config("springgrasp", run_name, args_dict)
+    
+    # Save args_dict to run_dir
+    conf_path = os.path.join(run_dir, "conf.json")
+    with open(conf_path, "w") as f:
+        json.dump(args_dict, f, indent=4)
 
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file)
@@ -172,6 +245,7 @@ if __name__ == "__main__":
         aff_labels = None
     
     # GPIS formulation - load or fit
+    # TODO if using cuda, need to compute GPIS with cuda
     if args.npz_path is not None:
         gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
     else:
@@ -313,7 +387,7 @@ if __name__ == "__main__":
             com=center[:3],
             gravity=False,
             weight_config=weight_config,
-            log=args.log,
+            conf=args,
         )
 
     # Get intial conditions
@@ -335,7 +409,7 @@ if __name__ == "__main__":
             "compliance": compliance.cpu().detach().numpy(),
             "joint_angles": init_joint_angles.cpu().detach().numpy(),
         }
-        save_path = os.path.join(os.path.dirname(args.npz_path), "sg_init_cond.npz")
+        save_path = os.path.join(run_dir, "sg_init_cond.npz")
         print("Saving initial conditions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
     if args.vis_ic:
@@ -398,7 +472,7 @@ if __name__ == "__main__":
             "opt_R": opt_R.cpu().detach().numpy(),
             "input_path": args.npz_path,
         }
-        save_path = os.path.join(os.path.dirname(args.npz_path), "sg_predictions.npz")
+        save_path = os.path.join(run_dir, "sg_predictions.npz")
         print("Saving predictions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
 
