@@ -964,6 +964,15 @@ class SpringGraspOptimizer:
             aff_labels_batched = aff_labels.repeat(num_envs, 1) # [N] --> [num_envs, N]
 
             if self.conf.func_metric_name == "contactgrasp":
+                if self.conf.func_finger_pts == "pregrasp":
+                    func_finger_pts = pregrasp_tip_pose_extended
+                elif self.conf.func_finger_pts == "contact":
+                    func_finger_pts = all_tip_pose
+                elif self.conf.func_finger_pts == "target":
+                    func_finger_pts = target_pose_extended
+                else:
+                    raise ValueError
+
                 func_cost = f_metrics.contactgrasp_metric(
                     gpis,
                     pts_batched,

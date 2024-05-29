@@ -67,6 +67,7 @@ def get_run_name(conf, with_scene_name=False):
         "func_contactgrasp_w_pos",
         "func_contactgrasp_w_neg",
         "func_contactgrasp_dp_thresh",
+        "func_finger_pts",
     ]
     
     conf_dict = vars(conf)
@@ -173,6 +174,7 @@ if __name__ == "__main__":
     parser.add_argument("--func_contactgrasp_w_pos", type=float, default=1.0, help="Weight for positive points")
     parser.add_argument("--func_contactgrasp_w_neg", type=float, default=1.0, help="Weight for negative points")
     parser.add_argument("--func_contactgrasp_dp_thresh", type=float, default=0.9)
+    parser.add_argument("--func_finger_pts", type=str, default="pregrasp", choices=["pregrasp", "contact", "target"], help="Finger points to use")
 
 
     args = parser.parse_args()
