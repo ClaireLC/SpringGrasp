@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 from gpis.gpis import GPIS
 import torch
 from utils import robot_configs
-from utils.pb_grasp_visualizer import GraspVisualizer
 from utils.create_arrow import create_direct_arrow
 import os
 import wandb
@@ -77,6 +76,8 @@ def get_run_name(conf, with_scene_name=False):
             val_str = "-".join([str(i) for i in val]).replace(".", "p")
         elif type(val) == float:
             val_str = str(val).replace(".", "p")
+        elif val is None:
+            val_str = "none"
         else:
             val_str = str(val)
 
@@ -199,30 +200,37 @@ if __name__ == "__main__":
     
     # Create run directory to log optimization results
     run_dir_name = get_run_name(args)
-    run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
+    if args.npz_path is not None:
+        run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
+    elif args.pcd_file is not None:
+        run_dir = os.path.dirname(args.pcd_file)
+    else:
+        run_dir = "output"
     if not os.path.exists(run_dir): os.makedirs(run_dir)
 
     # Set up wandb logging
-    run_name = get_run_name(args, with_scene_name=True)
-    args_dict = vars(args)
-    args_dict["run_dir"] = run_dir # Save run_dir to wandb log
     if args.log and args.npz_path is not None:
+        run_name = get_run_name(args, with_scene_name=True)
+        args_dict = vars(args)
+        args_dict["run_dir"] = run_dir # Save run_dir to wandb log
         set_wandb_config("springgrasp", run_name, args_dict)
     
-    # Save args_dict to run_dir
-    conf_path = os.path.join(run_dir, "conf.json")
-    with open(conf_path, "w") as f:
-        json.dump(args_dict, f, indent=4)
+        # Save args_dict to run_dir
+        conf_path = os.path.join(run_dir, "conf.json")
+        with open(conf_path, "w") as f:
+            json.dump(args_dict, f, indent=4)
 
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file)
         center = pcd.get_axis_aligned_bounding_box().get_center()
-        WRIST_OFFSET[:,0] += center[0]
-        WRIST_OFFSET[:,1] += center[1]
-        WRIST_OFFSET[:,2] += 2 * center[2]
-        init_wrist_poses = WRIST_OFFSET
+        #WRIST_OFFSET[:,0] += center[0]
+        #WRIST_OFFSET[:,1] += center[1]
+        #WRIST_OFFSET[:,2] += center[2]
+        #init_wrist_poses = WRIST_OFFSET
+        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
         input_pts = None
         aff_labels = None
+        input_path = args.pcd_file
     elif args.npz_path is not None:
         input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
         pcd = o3d.geometry.PointCloud()
@@ -236,6 +244,7 @@ if __name__ == "__main__":
             aff_labels = torch.tensor(input_dict["aff_labels"]).to(device).double()
         else:
             aff_labels = None
+        input_path = args.npz_path
     else:
         pcd = o3d.io.read_point_cloud("data/obj_cropped.ply")
         center = pcd.get_axis_aligned_bounding_box().get_center()
@@ -245,6 +254,7 @@ if __name__ == "__main__":
         init_wrist_poses = WRIST_OFFSET
         input_pts = None
         aff_labels = None
+        input_path = None
     
     # GPIS formulation - load or fit
     # TODO if using cuda, need to compute GPIS with cuda
@@ -253,7 +263,7 @@ if __name__ == "__main__":
     else:
         gpis_save_path = None
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
-    if os.path.exists(gpis_save_path):
+    if gpis_save_path is not None and os.path.exists(gpis_save_path):
         # Load
         print("Loading GPIS from", gpis_save_path)
         gpis = torch.load(gpis_save_path)
@@ -290,8 +300,9 @@ if __name__ == "__main__":
                     noise = torch.tensor([0.2] * len(externel_points)+
                                         data_noise +
                                         [0.05] * len(internal_points)).double().to(device))
-        torch.save(gpis, gpis_save_path)
-        print("Saved GPIS to", gpis_save_path)
+        if gpis_save_path is not None:
+            torch.save(gpis, gpis_save_path)
+            print("Saved GPIS to", gpis_save_path)
     if args.vis_gpis:
         print("Visualizing GPIS...")
         test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data([-bound+center[0],-bound+center[1],-bound+center[2]],
@@ -472,7 +483,7 @@ if __name__ == "__main__":
             "input_pts": np.asarray(pcd.points),
             "opt_t": opt_t.cpu().detach().numpy(),
             "opt_R": opt_R.cpu().detach().numpy(),
-            "input_path": args.npz_path,
+            "input_path": input_path,
         }
         save_path = os.path.join(run_dir, "sg_predictions.npz")
         print("Saving predictions to:", save_path)
@@ -480,6 +491,7 @@ if __name__ == "__main__":
 
     if args.vis is not None:
         if args.vis == "pb":
+            from utils.pb_grasp_visualizer import GraspVisualizer
             # Visualize grasp in pybullet
             pcd.colors = o3d.utility.Vector3dVector(np.array([0.0, 0.0, 1.0] * len(pcd.points)).reshape(-1,3))
             grasp_vis = GraspVisualizer(robot_urdf, pcd)
