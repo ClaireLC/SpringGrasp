@@ -236,7 +236,7 @@ if __name__ == "__main__":
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(input_dict["pts_wf"])
         #init_wrist_poses = init_cond.get_default_wrist_pose(pcd)
-        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
+        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd, viz=args.vis_ic, check_palm_ori=True)
         center = pcd.get_axis_aligned_bounding_box().get_center()
         
         input_pts = torch.tensor(input_dict["pts_wf"]).to(device).double()
