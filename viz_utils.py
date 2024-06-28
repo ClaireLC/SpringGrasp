@@ -159,6 +159,14 @@ def main(args):
 
     # Iterate through grasps in grasp_path.npz
     for grasp_i in tqdm(range(grasp_dict["palm_pose"].shape[0])):
+
+        # Only visualize feasible grasps
+        if not args.save:
+            if feasible_idx is not None and grasp_i not in feasible_idx:
+                continue
+            else:
+                print("Visualizing:", grasp_i)
+
         pts = grasp_dict["input_pts"]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts)
