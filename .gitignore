@@ -32,3 +32,5 @@ outputs/
 *.pyc
 *.ply
 __pycache__/
+*.png
+*.pt
