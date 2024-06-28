@@ -23,7 +23,7 @@ def get_default_wrist_pose(pcd):
 
     return WRIST_OFFSET
 
-def get_init_wrist_pose_from_pcd(pcd, viz=False, num_xy_offset=1):
+def get_init_wrist_pose_from_pcd(pcd, viz=False, num_xy_offset=1, check_palm_ori=False):
     """
     Get initial wrist poses
 
@@ -87,6 +87,16 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False, num_xy_offset=1):
         # rotate base_r by xy_delta_r in its local current frame (post-multiplication)
         XYZ_ori = (base_r * xy_delta_r).as_euler("XYZ")
 
+        # Check if palm is facing in orientaition that will be easy for arm to reach
+        # (ie. facing towards ground)
+        if check_palm_ori:
+            # Check cosine similaty between world frame z axis and palm z axis
+            z_wf = np.array([0,0,1])
+            wrist_z = base_r.as_matrix()[:, 2]
+            cos_sim = np.dot(z_wf, wrist_z) / (np.linalg.norm(wrist_z))
+            # Want cosine similarity to be above some threshold
+            if cos_sim < -0.5: continue
+
         # Create and append pose with base_pos (not translated along x and y) to list
         if viz:
             print(f"  Pose {len(wrist_poses)} xy offset from base pos: none")
@@ -120,6 +130,7 @@ def get_init_wrist_pose_from_pcd(pcd, viz=False, num_xy_offset=1):
                 # Visualize local wrist frame
                 if viz:
                     v_utils.vis_wrist_pose(pcd, pose, draw_frame=True)
+    if len(wrist_poses) == 0: raise ValueError("No initial conditions found")
     return np.array(wrist_poses)
 
 def get_start_and_target_ftip_pos(wrist_poses, joint_angles, optimizer, device):
