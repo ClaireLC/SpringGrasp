@@ -1,7 +1,7 @@
 import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
-from gpis.gpis import GPIS
+from gpis.gpis import GPIS # 3D point cloud generation
 import torch
 from utils import robot_configs
 from utils.create_arrow import create_direct_arrow
@@ -9,21 +9,33 @@ import os
 import wandb
 from datetime import date, datetime
 
+# Optimization components
 from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOptimizer
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
 
 import viz_utils as v_utils
 import get_initial_conditions as init_cond
 
-device = torch.device("cpu")
+device = torch.device("cpu") # Runs faster on CPU
 
 def vis_grasp(tip_pose, target_pose):
+    """
+    Visualize grasp vectors on 3D point cloud
+
+    Args:
+        tip_pose (_type_): _description_
+        target_pose (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     tip_pose = tip_pose.cpu().detach().numpy().squeeze()
     target_pose = target_pose.cpu().detach().numpy().squeeze()
     tips = []
     targets = []
     arrows = []
     color_code = np.array([[1,0,0],[0,1,0],[0,0,1],[1,1,0]])
+    
     for i in range(4):
         tip = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
         tip.paint_uniform_color(color_code[i])
@@ -31,20 +43,32 @@ def vis_grasp(tip_pose, target_pose):
         target = o3d.geometry.TriangleMesh.create_sphere(radius=0.0025)
         target.paint_uniform_color(color_code[i] * 0.4)
         target.translate(target_pose[i])
-        # create arrow point from tip to target
+
+        # Create arrow point from tip to target
         arrow = create_direct_arrow(tip_pose[i], target_pose[i])
         arrow.paint_uniform_color(color_code[i])
         tips.append(tip)
         targets.append(target)
         arrows.append(arrow)
+
     return tips, targets, arrows
 
 optimizers = {"sp": SpringGraspOptimizer,
               "fc":   FCGPISGraspOptimizer}
             
 def get_run_name(conf, with_scene_name=False):
-    today_date = date.today().strftime("%m-%d-%y")
-    timestamp = datetime.now().time().strftime("%H%M%S")
+    """
+    Generates name for wandb.
+
+    Args:
+        conf (_type_): _description_
+        with_scene_name (bool, optional): _description_. Defaults to False.
+
+    Returns:
+        _type_: _description_
+    """
+    # today_date = date.today().strftime("%m-%d-%y")
+    # timestamp = datetime.now().time().strftime("%H%M%S")
 
     if args.npz_path is not None:
         obj_name = os.path.basename(os.path.dirname((os.path.dirname(args.npz_path))))
@@ -61,11 +85,11 @@ def get_run_name(conf, with_scene_name=False):
     # Add conf params to name
     params_to_add = [
         "func_metric_name",
-        "w_func",
+        # "w_func",
         "func_contactgrasp_dist",
-        "func_contactgrasp_w_pos",
-        "func_contactgrasp_w_neg",
-        "func_contactgrasp_dp_thresh",
+        # "func_contactgrasp_w_pos",
+        # "func_contactgrasp_w_neg",
+        # "func_contactgrasp_dp_thresh",
         "func_finger_pts",
     ]
     
@@ -81,13 +105,11 @@ def get_run_name(conf, with_scene_name=False):
         else:
             val_str = str(val)
 
-        if key in [
-            "pretrained_pointnet_dir",
-        ]:
+        if key in ["pretrained_pointnet_dir",]:
             if val_str.lower() != "none":
                 val_str = "true"
 
-        # abbreviate key
+        # Abbreviate key
         splits = key.split("_")
         short_key = ""
 
@@ -96,16 +118,21 @@ def get_run_name(conf, with_scene_name=False):
     
         run_name += f"_{short_key}-{val_str}"
 
-    run_name += ("_" + today_date + "_" + timestamp)
+    # run_name += ("_" + today_date + "_" + timestamp)
 
     return run_name
 
 
 def set_wandb_config(project_name, run_name, conf, wandb_entity="clairec"):
     """
-    Set up wandb logging
-    """
+    Setup wandb logging.
 
+    Args:
+        project_name (str):
+        run_name (str):
+        conf (_type_): _description_
+        wandb_entity (str, optional): _description_. Defaults to "clairec".
+    """
     wandb.require("service")
     # Load or save wandb info
     exp_dir = os.path.dirname(conf["npz_path"])
@@ -129,29 +156,34 @@ def set_wandb_config(project_name, run_name, conf, wandb_entity="clairec"):
         config=conf,
     )
 
-
 def set_seeds():
     np.random.seed(0)
     torch.manual_seed(0)
 
-if __name__ == "__main__":
-    from argparse import ArgumentParser
-    import json
+from argparse import ArgumentParser
+import json
 
+if __name__ == "__main__":
+    OBJ_NAME = "plier"
+    OBJ_NUM = "obj8"
+    """ Example Script
+    python optimize_pregrasp.py --npz_path /juno/u/junhokim/code/zed_redis/pcd_data/clip/obj1/ann_pred_pcd.npz
+    """
     set_seeds()
 
     parser = ArgumentParser()
     parser.add_argument("--num_iters", type=int, default=200)
     parser.add_argument("--exp_name", type=str)
-    parser.add_argument("--pcd_file", type=str, default=None)
-    parser.add_argument("--mode", type=str, default="sp") # fc
+    parser.add_argument("--pcd_file", type=str, default=None, help="Point cloud file.")
+    parser.add_argument("--mode", type=str, default="sp", help="Optimization method") # fc
     parser.add_argument("--hand", type=str, default="allegro_right", choices=["allegro", "allegro_right", "leap"])
-    parser.add_argument("--mass", type=float, default=0.5) # Not use in the paper, may run into numerical issues.
+    parser.add_argument("--mass", type=float, default=0.5) # Not used in the paper, may run into numerical issues.
     parser.add_argument("--friction", type=float, default=1.0)
     parser.add_argument("--vis_gpis", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
 
-    parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
+    parser.add_argument("--npz_path", type=str, default=f"/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/ann_pred_pcd.npz", help="Path to input .npz (numpy) file with points")
+    parser.add_argument("--save_sg_path", type=str, default=f"./data/{OBJ_NAME}/{OBJ_NUM}", help="Path to save springgrasp output")
     parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
     parser.add_argument("--log", "-l", action="store_true", help="Log optimization to wandb")
@@ -177,7 +209,6 @@ if __name__ == "__main__":
     parser.add_argument("--func_contactgrasp_dp_thresh", type=float, default=0.9)
     parser.add_argument("--func_finger_pts", type=str, default="pregrasp", choices=["pregrasp", "contact", "target"], help="Finger points to use")
 
-
     args = parser.parse_args()
 
     if args.weight_config is not None:
@@ -200,8 +231,10 @@ if __name__ == "__main__":
     
     # Create run directory to log optimization results
     run_dir_name = get_run_name(args)
-    if args.npz_path is not None:
-        run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
+    # if args.npz_path is not None:
+    #     run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
+    if args.save_sg_path is not None:
+        run_dir = os.path.join(os.path.dirname(args.save_sg_path), run_dir_name)
     elif args.pcd_file is not None:
         run_dir = os.path.dirname(args.pcd_file)
     else:
@@ -209,7 +242,7 @@ if __name__ == "__main__":
     if not os.path.exists(run_dir): os.makedirs(run_dir)
 
     # Set up wandb logging
-    if args.log and args.npz_path is not None:
+    if args.log and args.save_sg_path is not None:
         run_name = get_run_name(args, with_scene_name=True)
         args_dict = vars(args)
         args_dict["run_dir"] = run_dir # Save run_dir to wandb log
@@ -220,13 +253,14 @@ if __name__ == "__main__":
         with open(conf_path, "w") as f:
             json.dump(args_dict, f, indent=4)
 
+    # Load files
     if args.pcd_file is not None:
-        pcd = o3d.io.read_point_cloud(args.pcd_file)
-        center = pcd.get_axis_aligned_bounding_box().get_center()
-        #WRIST_OFFSET[:,0] += center[0]
-        #WRIST_OFFSET[:,1] += center[1]
-        #WRIST_OFFSET[:,2] += center[2]
-        #init_wrist_poses = WRIST_OFFSET
+        pcd = o3d.io.read_point_cloud(args.pcd_file) # Read point cloud
+        center = pcd.get_axis_aligned_bounding_box().get_center() # Center of bounding box
+        # WRIST_OFFSET[:,0] += center[0]
+        # WRIST_OFFSET[:,1] += center[1]
+        # WRIST_OFFSET[:,2] += center[2]
+        # init_wrist_poses = WRIST_OFFSET
         init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
         input_pts = None
         aff_labels = None
@@ -262,6 +296,7 @@ if __name__ == "__main__":
         gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
     else:
         gpis_save_path = None
+
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
     if gpis_save_path is not None and os.path.exists(gpis_save_path):
         # Load
@@ -303,6 +338,7 @@ if __name__ == "__main__":
         if gpis_save_path is not None:
             torch.save(gpis, gpis_save_path)
             print("Saved GPIS to", gpis_save_path)
+
     if args.vis_gpis:
         print("Visualizing GPIS...")
         test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data([-bound+center[0],-bound+center[1],-bound+center[2]],
@@ -406,11 +442,13 @@ if __name__ == "__main__":
     # Get intial conditions
     num_guesses = len(init_wrist_poses)
     print("Number of initial guesses:", num_guesses)
+
     init_joint_angles = init_joint_angles.repeat_interleave(num_guesses,dim=0)
     compliance = compliance.repeat_interleave(num_guesses,dim=0)
     init_start_ftip_pos, target_pose = init_cond.get_start_and_target_ftip_pos(
         init_wrist_poses, init_joint_angles, grasp_optimizer, device,
     )
+    
     # Save initial pose info
     if args.npz_path is not None:
         data_dict = {
@@ -434,7 +472,7 @@ if __name__ == "__main__":
                 target_pose[i],
                 wrist_pose=init_wrist_poses[i],
                 draw_frame=True,
-                #wrist_frame="original",
+                # wrist_frame="original",
             )
         quit()
 
