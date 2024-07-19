@@ -57,19 +57,7 @@ optimizers = {"sp": SpringGraspOptimizer,
               "fc":   FCGPISGraspOptimizer}
             
 def get_run_name(conf, with_scene_name=False):
-    """
-    Generates name for wandb.
-
-    Args:
-        conf (_type_): _description_
-        with_scene_name (bool, optional): _description_. Defaults to False.
-
-    Returns:
-        _type_: _description_
-    """
-    # today_date = date.today().strftime("%m-%d-%y")
-    # timestamp = datetime.now().time().strftime("%H%M%S")
-
+    """Generates name for wandb"""
     if args.npz_path is not None:
         obj_name = os.path.basename(os.path.dirname((os.path.dirname(args.npz_path))))
         pos_name = os.path.basename((os.path.dirname(args.npz_path)))
@@ -85,11 +73,7 @@ def get_run_name(conf, with_scene_name=False):
     # Add conf params to name
     params_to_add = [
         "func_metric_name",
-        # "w_func",
         "func_contactgrasp_dist",
-        # "func_contactgrasp_w_pos",
-        # "func_contactgrasp_w_neg",
-        # "func_contactgrasp_dp_thresh",
         "func_finger_pts",
     ]
     
@@ -117,11 +101,7 @@ def get_run_name(conf, with_scene_name=False):
             short_key += split[0]
     
         run_name += f"_{short_key}-{val_str}"
-
-    # run_name += ("_" + today_date + "_" + timestamp)
-
     return run_name
-
 
 def set_wandb_config(project_name, run_name, conf, wandb_entity="clairec"):
     """
@@ -166,9 +146,11 @@ import json
 if __name__ == "__main__":
     OBJ_NAME = "plier"
     OBJ_NUM = "obj8"
+
     """ Example Script
     python optimize_pregrasp.py --npz_path /juno/u/junhokim/code/zed_redis/pcd_data/clip/obj1/ann_pred_pcd.npz
     """
+    
     set_seeds()
 
     parser = ArgumentParser()
@@ -182,7 +164,8 @@ if __name__ == "__main__":
     parser.add_argument("--vis_gpis", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
 
-    parser.add_argument("--npz_path", type=str, default=f"/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/ann_pred_pcd.npz", help="Path to input .npz (numpy) file with points")
+    # parser.add_argument("--npz_path", type=str, default=f"/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/ann_pred_pcd.npz", help="Path to input .npz (numpy) file with points")
+    parser.add_argument("--npz_path", type=str, default=f"/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/ann_gt_pcd.npz", help="Path to input .npz (numpy) file with points")
     parser.add_argument("--save_sg_path", type=str, default=f"./data/{OBJ_NAME}/{OBJ_NUM}", help="Path to save springgrasp output")
     parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
@@ -231,8 +214,6 @@ if __name__ == "__main__":
     
     # Create run directory to log optimization results
     run_dir_name = get_run_name(args)
-    # if args.npz_path is not None:
-    #     run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
     if args.save_sg_path is not None:
         run_dir = os.path.join(os.path.dirname(args.save_sg_path), run_dir_name)
     elif args.pcd_file is not None:
@@ -253,7 +234,7 @@ if __name__ == "__main__":
         with open(conf_path, "w") as f:
             json.dump(args_dict, f, indent=4)
 
-    # Load files
+    # Load object point cloud, affordance labels & find optimal initial poses
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file) # Read point cloud
         center = pcd.get_axis_aligned_bounding_box().get_center() # Center of bounding box
@@ -265,12 +246,14 @@ if __name__ == "__main__":
         input_pts = None
         aff_labels = None
         input_path = args.pcd_file
-    elif args.npz_path is not None:
+    elif args.npz_path is not None: # Use the npz_path
         input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(input_dict["pts_wf"])
-        #init_wrist_poses = init_cond.get_default_wrist_pose(pcd)
-        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd, viz=args.vis_ic, check_palm_ori=True)
+        # init_wrist_poses = init_cond.get_default_wrist_pose(pcd)
+        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd, 
+                                                                  viz=args.vis_ic,
+                                                                  check_palm_ori=True)
         center = pcd.get_axis_aligned_bounding_box().get_center()
         
         input_pts = torch.tensor(input_dict["pts_wf"]).to(device).double()
@@ -296,6 +279,9 @@ if __name__ == "__main__":
         gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
     else:
         gpis_save_path = None
+    
+    print(f"GPIS save path: {gpis_save_path}")
+    sys.exit()
 
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
     if gpis_save_path is not None and os.path.exists(gpis_save_path):
