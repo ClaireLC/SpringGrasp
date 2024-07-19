@@ -5,7 +5,7 @@ from gpis.gpis import GPIS # 3D point cloud generation
 import torch
 from utils import robot_configs
 from utils.create_arrow import create_direct_arrow
-import os
+import os, sys
 import wandb
 from datetime import date, datetime
 
@@ -13,7 +13,7 @@ from datetime import date, datetime
 from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOptimizer
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
 
-import viz_utils as v_utils
+import viz_utils
 import get_initial_conditions as init_cond
 
 device = torch.device("cpu") # Runs faster on CPU
@@ -140,22 +140,56 @@ def set_seeds():
     np.random.seed(0)
     torch.manual_seed(0)
 
+
+def viz_simple(name_, pcd):
+    # Load the saved data
+    exp_name = name_
+
+    contact_path = f"data/contact_{exp_name}.npy"
+    target_path = f"data/target_{exp_name}.npy"
+    wrist_path = f"data/wrist_{exp_name}.npy"
+
+    opt_tip_pose = np.load(contact_path, allow_pickle=True)
+    opt_target_pose = np.load(target_path, allow_pickle=True)
+    opt_palm_pose = np.load(wrist_path, allow_pickle=True)
+
+    # print(len(opt_tip_pose))
+    # print(len(opt_target_pose))
+    # print(len(opt_palm_pose))
+
+    pcd = pcd
+    idx_list = [4, 11, 14, 24]
+    for i in range(len(idx_list)):
+        viz_utils.vis_results(pcd, 
+                              opt_tip_pose[i], 
+                              opt_target_pose[i], 
+                              draw_frame=False,
+                              wrist_pose=opt_palm_pose[i],
+                              wrist_frame="springgrasp",
+                              save_path=None,)
+
 from argparse import ArgumentParser
 import json
 
 if __name__ == "__main__":
     OBJ_NAME = "plier"
     OBJ_NUM = "obj8"
+    GRASP_CALLER = True
+    EXP_NAME = "grasp"
 
     """ Example Script
     python optimize_pregrasp.py --npz_path /juno/u/junhokim/code/zed_redis/pcd_data/clip/obj1/ann_pred_pcd.npz
     """
+
+    # if GRASP_CALLER:
+    #     viz_simple(EXP_NAME)
+    #     sys.exit()
     
     set_seeds()
 
     parser = ArgumentParser()
     parser.add_argument("--num_iters", type=int, default=200)
-    parser.add_argument("--exp_name", type=str)
+    parser.add_argument("--exp_name", type=str, default=f"{EXP_NAME}")
     parser.add_argument("--pcd_file", type=str, default=None, help="Point cloud file.")
     parser.add_argument("--mode", type=str, default="sp", help="Optimization method") # fc
     parser.add_argument("--hand", type=str, default="allegro_right", choices=["allegro", "allegro_right", "leap"])
@@ -167,7 +201,7 @@ if __name__ == "__main__":
     # parser.add_argument("--npz_path", type=str, default=f"/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/ann_pred_pcd.npz", help="Path to input .npz (numpy) file with points")
     parser.add_argument("--npz_path", type=str, default=f"/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/ann_gt_pcd.npz", help="Path to input .npz (numpy) file with points")
     parser.add_argument("--save_sg_path", type=str, default=f"./data/{OBJ_NAME}/{OBJ_NUM}", help="Path to save springgrasp output")
-    parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
+    parser.add_argument("--vis", choices=["pb", "o3d"], default="o3d", help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
     parser.add_argument("--log", "-l", action="store_true", help="Log optimization to wandb")
 
@@ -272,6 +306,11 @@ if __name__ == "__main__":
         input_pts = None
         aff_labels = None
         input_path = None
+
+    if GRASP_CALLER:
+        viz_simple(EXP_NAME, pcd)
+        sys.exit()
+
     
     # GPIS formulation - load or fit
     # TODO if using cuda, need to compute GPIS with cuda
@@ -279,9 +318,7 @@ if __name__ == "__main__":
         gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
     else:
         gpis_save_path = None
-    
     print(f"GPIS save path: {gpis_save_path}")
-    sys.exit()
 
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
     if gpis_save_path is not None and os.path.exists(gpis_save_path):
@@ -315,20 +352,21 @@ if __name__ == "__main__":
                                         [0., 0., -bound]]).double().to(device)
         externel_points += torch.from_numpy(center).to(device).double()
         y = torch.vstack([bound * torch.ones_like(externel_points[:,0]).to(device).view(-1,1),
-                        torch.zeros_like(points[:,0]).to(device).view(-1,1),
-                        -bound * 0.3 * torch.ones_like(internal_points[:,0]).to(device).view(-1,1)])
+                          torch.zeros_like(points[:,0]).to(device).view(-1,1),
+                          -bound * 0.3 * torch.ones_like(internal_points[:,0]).to(device).view(-1,1)])
         gpis.fit(torch.vstack([externel_points, points, internal_points]), y,
-                    noise = torch.tensor([0.2] * len(externel_points)+
-                                        data_noise +
-                                        [0.05] * len(internal_points)).double().to(device))
+                              noise = torch.tensor([0.2] * len(externel_points) + data_noise + 
+                              [0.05] * len(internal_points)).double().to(device))
         if gpis_save_path is not None:
             torch.save(gpis, gpis_save_path)
             print("Saved GPIS to", gpis_save_path)
 
     if args.vis_gpis:
         print("Visualizing GPIS...")
-        test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data([-bound+center[0],-bound+center[1],-bound+center[2]],
-                                                                            [bound+center[0],bound+center[1],bound+center[2]],steps=100)
+        test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data(
+            [-bound+center[0],-bound+center[1],-bound+center[2]],
+            [bound+center[0],bound+center[1],bound+center[2]],
+            steps=100)
         plt.imshow(test_mean[:,:,50], cmap="seismic", vmax=bound, vmin=-bound)
         plt.show()
         vis_points, vis_normals, vis_var = gpis.topcd(
@@ -351,17 +389,20 @@ if __name__ == "__main__":
         o3d.visualization.draw_geometries([fitted_pcd])
 
         if args.exp_name is not None:
-            np.savez(f"gpis_states/{args.exp_name}_gpis.npz", mean=test_mean, var=test_var, normal=test_normal, ub=ub, lb=lb)
+            np.savez(f"gpis_states/{args.exp_name}_gpis.npz", 
+                        mean=test_mean, 
+                        var=test_var, 
+                        normal=test_normal, 
+                        ub=ub, 
+                        lb=lb)
         else:
-            gpis_dict = {
-                "mean": test_mean,
-                "var": test_var,
-                "normal": test_normal,
-                "ub": ub,
-                "lb": lb,
-                "bound": bound,
-                "center": center,
-            }
+            gpis_dict = {"mean": test_mean,
+                        "var": test_var,
+                        "normal": test_normal,
+                        "ub": ub,
+                        "lb": lb,
+                        "bound": bound,
+                        "center": center,}
             if args.npz_path is not None:
                 save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.npz")
                 print("Saving GPIS results to:", save_path)
@@ -429,11 +470,15 @@ if __name__ == "__main__":
     num_guesses = len(init_wrist_poses)
     print("Number of initial guesses:", num_guesses)
 
-    init_joint_angles = init_joint_angles.repeat_interleave(num_guesses,dim=0)
-    compliance = compliance.repeat_interleave(num_guesses,dim=0)
+    # Based on the initial joint angles
+    # the init, target vectors are created
+    init_joint_angles = init_joint_angles.repeat_interleave(num_guesses, dim=0)
+    compliance = compliance.repeat_interleave(num_guesses, dim=0)
     init_start_ftip_pos, target_pose = init_cond.get_start_and_target_ftip_pos(
-        init_wrist_poses, init_joint_angles, grasp_optimizer, device,
-    )
+                                                                init_wrist_poses, 
+                                                                init_joint_angles, 
+                                                                grasp_optimizer, 
+                                                                device,)
     
     # Save initial pose info
     if args.npz_path is not None:
@@ -449,34 +494,39 @@ if __name__ == "__main__":
         save_path = os.path.join(run_dir, "sg_init_cond.npz")
         print("Saving initial conditions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
+        
     if args.vis_ic:
         for i in range(num_guesses):
             print("Initial condition:", i)
-            v_utils.vis_results(
-                pcd,
-                init_start_ftip_pos[i],
-                target_pose[i],
-                wrist_pose=init_wrist_poses[i],
-                draw_frame=True,
-                # wrist_frame="original",
-            )
+            viz_utils.vis_results(pcd,
+                                  init_start_ftip_pos[i],
+                                  target_pose[i],
+                                  wrist_pose=init_wrist_poses[i],
+                                  draw_frame=True,)
+                                # wrist_frame="original",)
         quit()
 
     # Run optimization
     if args.mode == "sp":
         opt_joint_angles, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_R, opt_t = grasp_optimizer.optimize(
-            init_joint_angles,
-            target_pose,
-            compliance,
-            friction_mu,
-            gpis,
-            pts=input_pts,
-            aff_labels=aff_labels,
-            verbose=True,
-        )
-        opt_tip_pose = grasp_optimizer.forward_kinematics(opt_joint_angles, opt_palm_pose)
+                                                init_joint_angles,
+                                                target_pose,
+                                                compliance,
+                                                friction_mu,
+                                                gpis,
+                                                pts=input_pts,
+                                                aff_labels=aff_labels,
+                                                verbose=True,)
+        opt_tip_pose = grasp_optimizer.forward_kinematics(opt_joint_angles,
+                                                          opt_palm_pose)
     elif args.mode == "fc":
-        opt_tip_pose, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_joint_angles = grasp_optimizer.optimize(init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True)
+        opt_tip_pose, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_joint_angles = grasp_optimizer.optimize(
+                                                    init_joint_angles, 
+                                                    target_pose, 
+                                                    compliance, 
+                                                    friction_mu, 
+                                                    gpis, 
+                                                    verbose=True,)
     
     # Get feasible idx
     idx_list = []
@@ -485,7 +535,9 @@ if __name__ == "__main__":
             idx_list.append(i)
         else:
             continue
-    print("Feasible indices:",idx_list, "Feasible rate:", len(idx_list)/opt_tip_pose.shape[0])
+
+    print("Feasible indices:", idx_list)
+    print("Feasible rate:", len(idx_list)/opt_tip_pose.shape[0])
     print("Optimal compliance:", opt_compliance)
 
     # Save grasps
@@ -499,9 +551,9 @@ if __name__ == "__main__":
                 np.save(f"data/joint_angle_{args.exp_name}.npy", opt_joint_angles.cpu().detach().numpy()[idx_list])
     else:
         data_dict = {
-            "feasible_idx": np.array([idx_list]),
-            "start_tip_pose": opt_tip_pose.cpu().detach().numpy(),
-            "target_tip_pose": opt_target_pose.cpu().detach().numpy(),
+            "feasible_idx": np.array([idx_list]), # Feasible ones --> Is this implemented or given?
+            "start_tip_pose": opt_tip_pose.cpu().detach().numpy(), # Probably the vector start point
+            "target_tip_pose": opt_target_pose.cpu().detach().numpy(), # Probably the vector end point
             "palm_pose": opt_palm_pose.cpu().detach().numpy(),
             "compliance": opt_compliance.cpu().detach().numpy(),
             "input_pts": np.asarray(pcd.points),
@@ -528,11 +580,21 @@ if __name__ == "__main__":
                                             wrist_pose=opt_palm_pose[i].detach().cpu().numpy(), 
                                             target_pose=opt_target_pose[i].detach().cpu().numpy())
                 o3d.visualization.draw_geometries([pcd, *tips, *targets, *arrows])
-
+        
+        viz_wrist_post_ = False
         if args.vis == "o3d":
             for i in idx_list:
                 print("Grasp:", i)
-                v_utils.vis_results(
-                    pcd, opt_tip_pose[i], opt_target_pose[i],
-                    wrist_pose=opt_palm_pose[i].cpu().detach().numpy(),
-                )
+                if viz_wrist_post_:
+                    viz_utils.vis_wrist_pose(pcd = pcd, 
+                                            pose = opt_palm_pose[i].cpu().detach().numpy(), 
+                                            draw_frame = False,
+                                            wrist_frame="springgrasp",)
+                else:
+                    viz_utils.vis_results(pcd, # input pcd
+                                        opt_tip_pose[i], # index based
+                                        opt_target_pose[i], # index based
+                                        draw_frame = False,
+                                        wrist_pose=opt_palm_pose[i].cpu().detach().numpy(),
+                                        wrist_frame="springgrasp",
+                                        save_path=None,)
