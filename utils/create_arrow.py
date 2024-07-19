@@ -58,17 +58,16 @@ def calculate_zy_rotation_for_arrow(vec):
     return(Rz, Ry)
 
 def create_arrow(scale=10):
-    """
-    Create an arrow in for Open3D
-    """
+    """Create an arrow in for Open3D"""
     cone_height = scale*0.2
     cylinder_height = scale*0.8
     cone_radius = scale/10
     cylinder_radius = scale/20
-    mesh_frame = o3d.geometry.TriangleMesh.create_arrow(cone_radius=cone_radius,
-        cone_height=cone_height,
-        cylinder_radius=cylinder_radius,
-        cylinder_height=cylinder_height)
+    mesh_frame = o3d.geometry.TriangleMesh.create_arrow(
+            cone_radius=cone_radius,
+            cone_height=cone_height,
+            cylinder_radius=cylinder_radius,
+            cylinder_height=cylinder_height)
     return mesh_frame
 
 def get_arrow(origin=[0, 0, 0], end=None, vec=None):
@@ -158,13 +157,17 @@ def create_direct_arrow(point_a, point_b):
     length = np.linalg.norm(direction)
 
     # Create an arrow
-    cone_height = length*0.2
-    cone_radius = length/10
-    cylinder_radius = length/20
-    arrow = o3d.geometry.TriangleMesh.create_arrow(cylinder_radius=cylinder_radius, 
-                                                   cone_radius=cone_radius, 
-                                                   cylinder_height=length - cone_height, 
-                                                   cone_height=cone_height)
+    cone_height = length*0.08
+    cone_radius = length/40
+    cylinder_radius = length/60
+    # print(cone_height)
+    # print(cone_radius)
+    # print(cylinder_radius)
+    arrow = o3d.geometry.TriangleMesh.create_arrow(
+                cylinder_radius=cylinder_radius, 
+                cone_radius=cone_radius, 
+                cylinder_height=length - cone_height, 
+                cone_height=cone_height)
 
     # Normalize the direction
     if length > 0:

@@ -5,8 +5,47 @@ import argparse
 import torch
 from tqdm import tqdm
 import os, sys
+import matplotlib
 
 from utils.create_arrow import create_direct_arrow
+
+def are_point_clouds_equal(pcd1, pcd2):
+    points1 = np.asarray(pcd1.points)
+    points2 = np.asarray(pcd2.points)
+    
+    # Check if the shapes of the point arrays are the same
+    if points1.shape != points2.shape:
+        return False
+    
+    # Check if all points are equal
+    return np.allclose(points1, points2)
+
+
+def load_affordance_pcd(pcd_path):
+    loaded_data = np.load(pcd_path, allow_pickle=True)
+    data = loaded_data['data'].item()
+
+    pts_wf = data["pts_wf"]
+    aff_labels = data["aff_labels"]
+    pts_rgb = data["pts_rgb"]
+
+    # Create Open3D point cloud object
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts_wf)
+
+    # Create a colormap for the affordance labels
+    unique_labels = np.unique(aff_labels)
+    label_colors = matplotlib.colormaps.get_cmap('Set2')
+
+    # Map each label to a color
+    label_color_map = np.array([label_colors(i) for i in range(len(unique_labels))])[:, :3]
+    label_colors_rgb = label_color_map[aff_labels.astype(int)]
+
+    # Set the colors of the point cloud based on affordance labels
+    pcd.colors = o3d.utility.Vector3dVector(label_colors_rgb)
+    
+    return pcd
+
 
 def sanity_check_intersection_points(intersection_points, pcd, threshold=0.003):
     original_points = np.asarray(pcd.points)
@@ -177,6 +216,21 @@ def vis_results(pcd,
                 wrist_pose=None, # not none
                 wrist_frame="springgrasp",
                 save_path=None,):
+    
+    # Load affordance mask
+    pcd_path = "/juno/u/junhokim/code/zed_redis/pcd_data/plier/obj8/ann_gt_pcd.npz"
+    pcd_n = load_affordance_pcd(pcd_path)
+
+    # Check if the passed pcd is the same as the loaded pcd but with different colors
+    if are_point_clouds_equal(pcd, pcd_n):
+        print("The passed point cloud and the loaded point cloud are the same, but with different colors.")
+    else:
+        print("The passed point cloud and the loaded point cloud are different.")
+    
+    pcd = pcd_n
+    
+    # sys.exit()
+
     # Plot and save without opening a window
     vis = o3d.visualization.Visualizer()
     vis.create_window()
