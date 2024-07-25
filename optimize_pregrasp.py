@@ -141,13 +141,13 @@ def set_seeds():
     torch.manual_seed(0)
 
 
-def viz_simple(name_, pcd):
+def viz_simple(name_, pcd, pcd_path):
     # Load the saved data
     exp_name = name_
 
-    contact_path = f"data/contact_{exp_name}.npy"
-    target_path = f"data/target_{exp_name}.npy"
-    wrist_path = f"data/wrist_{exp_name}.npy"
+    contact_path = os.path.join(args.exp_name, "contact.npy")
+    target_path = os.path.join(args.exp_name, "target.npy")
+    wrist_path = os.path.join(args.exp_name, "wrist.npy")
 
     opt_tip_pose = np.load(contact_path, allow_pickle=True)
     opt_target_pose = np.load(target_path, allow_pickle=True)
@@ -166,30 +166,21 @@ def viz_simple(name_, pcd):
                               draw_frame=False,
                               wrist_pose=opt_palm_pose[i],
                               wrist_frame="springgrasp",
-                              save_path=None,)
+                              save_path=None,
+                              pcd_path=pcd_path)
 
 from argparse import ArgumentParser
 import json
 
 if __name__ == "__main__":
     OBJ_NAME = "plier"
-    OBJ_NUM = "obj8"
-    GRASP_CALLER = True
-    EXP_NAME = "grasp"
-
-    """ Example Script
-    python optimize_pregrasp.py --npz_path /juno/u/junhokim/code/zed_redis/pcd_data/clip/obj1/ann_pred_pcd.npz
-    """
-
-    # if GRASP_CALLER:
-    #     viz_simple(EXP_NAME)
-    #     sys.exit()
+    OBJ_NUM = "obj2"
+    GRASP_CALLER = False
     
     set_seeds()
-
     parser = ArgumentParser()
     parser.add_argument("--num_iters", type=int, default=200)
-    parser.add_argument("--exp_name", type=str, default=f"{EXP_NAME}")
+    parser.add_argument("--exp_name", type=str, default=f"/juno/u/junhokim/code/SpringGrasp/data/grasp/{OBJ_NAME}/{OBJ_NUM}/")
     parser.add_argument("--pcd_file", type=str, default=None, help="Point cloud file.")
     parser.add_argument("--mode", type=str, default="sp", help="Optimization method") # fc
     parser.add_argument("--hand", type=str, default="allegro_right", choices=["allegro", "allegro_right", "leap"])
@@ -232,19 +223,17 @@ if __name__ == "__main__":
         weight_config = json.load(open(f"weight_config/{args.weight_config}.json"))
     else:
         # Use default weights
-        weight_config = {
-            "w_sp": args.w_sp,
-            "w_dist": args.w_dist,
-            "w_tar": args.w_tar,
-            "w_uncer": args.w_uncer,
-            "w_gain": args.w_gain,
-            "w_col": args.w_col,
-            "w_reg": args.w_reg,
-            "w_force": args.w_force,
-            "w_pre_dist": args.w_pre_dist,
-            "w_palm_dist": args.w_palm_dist,
-            "w_func": args.w_func,
-        }
+        weight_config = {"w_sp": args.w_sp,
+                        "w_dist": args.w_dist,
+                        "w_tar": args.w_tar,
+                        "w_uncer": args.w_uncer,
+                        "w_gain": args.w_gain,
+                        "w_col": args.w_col,
+                        "w_reg": args.w_reg,
+                        "w_force": args.w_force,
+                        "w_pre_dist": args.w_pre_dist,
+                        "w_palm_dist": args.w_palm_dist,
+                        "w_func": args.w_func,}
     
     # Create run directory to log optimization results
     run_dir_name = get_run_name(args)
@@ -307,11 +296,12 @@ if __name__ == "__main__":
         aff_labels = None
         input_path = None
 
+    # Sanity check for metric 3
     if GRASP_CALLER:
-        viz_simple(EXP_NAME, pcd)
+        viz_simple(args.exp_name, pcd, args.npz_path)
+        # viz_simple(EXP_NAME, pcd, args.npz_path)
         sys.exit()
 
-    
     # GPIS formulation - load or fit
     # TODO if using cuda, need to compute GPIS with cuda
     if args.npz_path is not None:
@@ -375,8 +365,7 @@ if __name__ == "__main__":
             [-bound+center[0],-bound+center[1],-bound+center[2]],
             [bound+center[0],bound+center[1],bound+center[2]],
             test_var=test_var,
-            steps=100,
-        )
+            steps=100,)
         vis_var = vis_var / vis_var.max()
         fitted_pcd = o3d.geometry.PointCloud()
         fitted_pcd.points = o3d.utility.Vector3dVector(vis_points)
@@ -390,11 +379,11 @@ if __name__ == "__main__":
 
         if args.exp_name is not None:
             np.savez(f"gpis_states/{args.exp_name}_gpis.npz", 
-                        mean=test_mean, 
-                        var=test_var, 
-                        normal=test_normal, 
-                        ub=ub, 
-                        lb=lb)
+                     mean=test_mean, 
+                     var=test_var, 
+                     normal=test_normal, 
+                     ub=ub, 
+                     lb=lb)
         else:
             gpis_dict = {"mean": test_mean,
                         "var": test_var,
@@ -529,6 +518,9 @@ if __name__ == "__main__":
                                                     verbose=True,)
     
     # Get feasible idx
+    #! It is using stableness to calculate feasibility, not the 
+    #! alignment with affordances. The affordance implementation
+    #! is just for the ranking of the outputs
     idx_list = []
     for i in range(opt_tip_pose.shape[0]):
         if opt_margin[i].min() > 0.0:
@@ -540,15 +532,22 @@ if __name__ == "__main__":
     print("Feasible rate:", len(idx_list)/opt_tip_pose.shape[0])
     print("Optimal compliance:", opt_compliance)
 
+    if not os.path.exists(args.exp_name):
+        os.makedirs(args.exp_name)
+
     # Save grasps
     if args.exp_name is not None:
         if len(idx_list) > 0:
-            np.save(f"data/contact_{args.exp_name}.npy", opt_tip_pose.cpu().detach().numpy()[idx_list])
-            np.save(f"data/target_{args.exp_name}.npy", opt_target_pose.cpu().detach().numpy()[idx_list])
-            np.save(f"data/wrist_{args.exp_name}.npy", opt_palm_pose.cpu().detach().numpy()[idx_list])
-            np.save(f"data/compliance_{args.exp_name}.npy", opt_compliance.cpu().detach().numpy()[idx_list])
+            np.save(os.path.join(args.exp_name, "contact.npy"), opt_tip_pose.cpu().detach().numpy()[idx_list])
+            np.save(os.path.join(args.exp_name, "target.npy"), opt_target_pose.cpu().detach().numpy()[idx_list])
+            np.save(os.path.join(args.exp_name, "wrist.npy"), opt_palm_pose.cpu().detach().numpy()[idx_list])
+            np.save(os.path.join(args.exp_name, "compliance.npy"), opt_compliance.cpu().detach().numpy()[idx_list])
+            # np.save(f"data/{}/contact.npy", opt_tip_pose.cpu().detach().numpy()[idx_list])
+            # np.save(f"data/target.npy", opt_target_pose.cpu().detach().numpy()[idx_list])
+            # np.save(f"data/wrist.npy", opt_palm_pose.cpu().detach().numpy()[idx_list])
+            # np.save(f"data/compliance.npy", opt_compliance.cpu().detach().numpy()[idx_list])
             if args.mode == "prob":
-                np.save(f"data/joint_angle_{args.exp_name}.npy", opt_joint_angles.cpu().detach().numpy()[idx_list])
+                np.save(f"data/joint_angle.npy", opt_joint_angles.cpu().detach().numpy()[idx_list])
     else:
         data_dict = {
             "feasible_idx": np.array([idx_list]), # Feasible ones --> Is this implemented or given?
@@ -559,8 +558,7 @@ if __name__ == "__main__":
             "input_pts": np.asarray(pcd.points),
             "opt_t": opt_t.cpu().detach().numpy(),
             "opt_R": opt_R.cpu().detach().numpy(),
-            "input_path": input_path,
-        }
+            "input_path": input_path,}
         save_path = os.path.join(run_dir, "sg_predictions.npz")
         print("Saving predictions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
@@ -577,8 +575,8 @@ if __name__ == "__main__":
             for i in idx_list:
                 tips, targets, arrows = vis_grasp(opt_tip_pose[i], opt_target_pose[i])
                 grasp_vis.visualize_grasp(joint_angles=opt_joint_angles[i].detach().cpu().numpy(), 
-                                            wrist_pose=opt_palm_pose[i].detach().cpu().numpy(), 
-                                            target_pose=opt_target_pose[i].detach().cpu().numpy())
+                                          wrist_pose=opt_palm_pose[i].detach().cpu().numpy(), 
+                                          target_pose=opt_target_pose[i].detach().cpu().numpy())
                 o3d.visualization.draw_geometries([pcd, *tips, *targets, *arrows])
         
         viz_wrist_post_ = False
@@ -587,14 +585,15 @@ if __name__ == "__main__":
                 print("Grasp:", i)
                 if viz_wrist_post_:
                     viz_utils.vis_wrist_pose(pcd = pcd, 
-                                            pose = opt_palm_pose[i].cpu().detach().numpy(), 
-                                            draw_frame = False,
-                                            wrist_frame="springgrasp",)
+                                             pose = opt_palm_pose[i].cpu().detach().numpy(), 
+                                             draw_frame = False,
+                                             wrist_frame="springgrasp",)
                 else:
                     viz_utils.vis_results(pcd, # input pcd
-                                        opt_tip_pose[i], # index based
-                                        opt_target_pose[i], # index based
-                                        draw_frame = False,
-                                        wrist_pose=opt_palm_pose[i].cpu().detach().numpy(),
-                                        wrist_frame="springgrasp",
-                                        save_path=None,)
+                                          opt_tip_pose[i], # index based
+                                          opt_target_pose[i], # index based
+                                          draw_frame = False,
+                                          wrist_pose=opt_palm_pose[i].cpu().detach().numpy(),
+                                          wrist_frame="springgrasp",
+                                          save_path=None,
+                                          pcd_path=args.npz_path,)
