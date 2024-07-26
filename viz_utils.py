@@ -49,7 +49,7 @@ def load_affordance_pcd(pcd_path):
     
     return pcd, mask_seperate
 
-def sanity_check_intersection_points(intersection_points, pcd, threshold=0.003):
+def sanity_check_intersection_points(intersection_points, pcd, threshold=0.004):
     original_points = np.asarray(pcd.points)
     valid_points = []
     for point in intersection_points:
@@ -62,15 +62,15 @@ def sanity_check_intersection_points(intersection_points, pcd, threshold=0.003):
 
     return valid_points
 
-def adjust_ray_length(arrow_start, arrow_end, max_length):
-    direction = arrow_end - arrow_start
-    length = np.linalg.norm(direction)
+# def adjust_ray_length(arrow_start, arrow_end, max_length):
+#     direction = arrow_end - arrow_start
+#     length = np.linalg.norm(direction)
     
-    if length > max_length:
-        direction = direction / length  # Normalize the direction
-        arrow_end = arrow_start + direction * max_length
+#     if length > max_length:
+#         direction = direction / length  # Normalize the direction
+#         arrow_end = arrow_start + direction * max_length
     
-    return arrow_start, arrow_end
+#     return arrow_start, arrow_end
 
 def check_vector_intersection_points(arrow_start, arrow_end, pcd):
     # Estimate normals for the point cloud
@@ -103,11 +103,18 @@ def check_vector_intersection_points(arrow_start, arrow_end, pcd):
     raycasting_scene = o3d.t.geometry.RaycastingScene()
     mesh_id = raycasting_scene.add_triangles(bpa_mesh_t)
     ans = raycasting_scene.cast_rays(rays)
+
+    # print(ans)
+    # print(type(ans))
     
     # Check if there is an intersection
     hit = ans['t_hit'].isfinite()
     if not hit.any().item():
         return False, None  # Return False if no intersection is found
+
+    # print(hit)
+    # print(type(hit))
+    # sys.exit()
     
     # Compute the first intersection point
     # t_hit = ans['t_hit'][hit].numpy()
@@ -125,8 +132,10 @@ def check_vector_intersection_points(arrow_start, arrow_end, pcd):
     # intersection_points_pcd = original_points[closest_point_index]
     
     # Compute intersection points manually
+    """
     t_hit = ans['t_hit'][hit].numpy()
     intersection_points_mesh = arrow_start + t_hit[:, None] * direction
+    """
 
     # Filter out intersection points that are beyond max_length
     # valid_intersection_points_mesh = []
@@ -134,6 +143,7 @@ def check_vector_intersection_points(arrow_start, arrow_end, pcd):
     #     if t <= max_length:
     #         valid_intersection_points_mesh.append(arrow_start + t * direction)
     
+    """
     # Find the corresponding points in the original point cloud
     original_points = np.asarray(pcd.points)
     intersection_points_pcd = []
@@ -143,6 +153,32 @@ def check_vector_intersection_points(arrow_start, arrow_end, pcd):
         intersection_points_pcd.append(original_points[closest_point_index])
     
     return True, intersection_points_pcd  # Return True and the list of intersection points
+    """
+
+    # Compute the first intersection point
+    t_hit = ans['t_hit'][hit].numpy()
+    first_t_hit = np.min(t_hit)
+    
+    # if first_t_hit > max_length:
+    #     return False, None  # No valid intersection within max_length
+    if not first_t_hit:
+        return False, None
+    
+    first_intersection_point_mesh = arrow_start + first_t_hit * direction
+    
+    # Find the corresponding point in the original point cloud
+    original_points = np.asarray(pcd.points)
+    distances = np.linalg.norm(original_points - first_intersection_point_mesh, axis=1)
+    closest_point_index = np.argmin(distances)
+    intersection_points_pcd = original_points[closest_point_index]
+
+    print("=========================== intersection_points_pcd")
+    print(intersection_points_pcd)
+    # print(type(intersection_points_pcd))
+    # print(len(intersection_points_pcd))
+    # print("===========================")
+
+    return True, intersection_points_pcd
 
 def check_arrow_contact_with_pcd(arrow_start, arrow_end, pcd):
     # Estimate normals for the point cloud
@@ -203,24 +239,18 @@ def check_arrow_contact_with_mask_regions(arrow_start,
         masked_pcd = o3d.geometry.PointCloud()
         masked_pcd.points = o3d.utility.Vector3dVector(masked_points)
 
-        # Assign a color to this mask region
-        # color_idx = region_idx % num_colors
-        # color = color_map(color_idx)[:3]  # Get RGB values
-        # masked_colors = np.tile(color, (masked_points.shape[0], 1))
-        # masked_pcd.colors = o3d.utility.Vector3dVector(masked_colors)
-
-        # # Visualize the masked point cloud
-        # vis = o3d.visualization.Visualizer()
-        # vis.create_window(window_name=f"Masked Point Cloud Region {region_idx}")
-        # vis.add_geometry(masked_pcd)
-        # vis.run()
-        # vis.destroy_window()
-
         # Check if the arrow intersects with this masked point cloud
-        contact, intersection_points = check_vector_intersection_points(arrow_start, arrow_end, masked_pcd)
+        contact, intersection_points = check_vector_intersection_points(arrow_start,
+                                                                        arrow_end, 
+                                                                        masked_pcd)
         if contact:
+            print("================= region, contact")
+            print(region_idx, intersection_points)
+            # print("======================")
             hits.append(region_idx)
+
         contact_info.append((region_idx, contact, intersection_points))
+
     return contact_info, hits
 
 
@@ -288,7 +318,6 @@ def vis_results(pcd,
                 pcd_path=None):
     
     # Load gt affordance mask
-    # pcd_path = "/juno/u/junhokim/code/zed_redis/pcd_data/plier/obj1/ann_gt_pcd.npz"
     if pcd_path:
         print(pcd_path)
         pcd_n, gt_masks = load_affordance_pcd(pcd_path)
@@ -310,6 +339,7 @@ def vis_results(pcd,
     intersection_points_all = []
     total_hits = defaultdict(list)
     for i in range(len(arrows)):
+        print(f"Arrrow num: {i}")
         if torch.is_tensor(init_ftip_pos[i]):
             arrow_start = init_ftip_pos[i].cpu().detach().numpy()
         else:
@@ -318,34 +348,76 @@ def vis_results(pcd,
             arrow_end = target_ftip_pos[i].cpu().detach().numpy()
         else:
             arrow_end = target_ftip_pos[i]
-    
-        # contact, intersection_points = check_vector_intersection_points(arrow_start, arrow_end, pcd)
-    
-        # if contact:
-        #     print(f"Arrow {i} makes contact with pcd at: {intersection_points}.")
-        #     intersection_points_all.extend(intersection_points)
-        # else:
-        #     print(f"Arrow {i} doesn't make contact with pcd.")
 
         # Check contact with each gt mask
         contact_info_gt, hits = check_arrow_contact_with_mask_regions(arrow_start, 
-                                                                arrow_end, 
-                                                                gt_masks, 
-                                                                pcd,
-                                                                i,)
-        if len(hits) > 0:
-            for h in hits:
-                total_hits[h].append(i)
-        for region_idx, contact, intersection_points in contact_info_gt:
+                                                                      arrow_end, 
+                                                                      gt_masks, 
+                                                                      pcd, 
+                                                                      i,)
+        # print(type(contact_info_gt))
+        # print(len(contact_info_gt))
+        print("========== CONTACT INFO GT: ========")
+        print(contact_info_gt)
+        # sys.exit()
+
+        # Filter out invalid intersections
+        valid_intersections = [x for x in contact_info_gt if x[2] is not None]
+        if valid_intersections:
+            closest_intersection = min(valid_intersections, key=lambda x: np.linalg.norm(arrow_start - x[2]))
+            print("================ closest intersection")
+            print(closest_intersection)
+            # sys.exit()
+            # intersection_points_all.append(closest_intersection[0])
+            print("================ hits")
+            # if closest_intersection:
+            #     hits = []
+            #     hits.append(closest_intersection[0])
+
+            if closest_intersection[1]:
+                hit_region = closest_intersection[0]
+                # print(type(hit_region), hit_region)
+                total_hits[hit_region].append(i)
+
+
+            # if len(hits) > 0:
+            #     for h in hits:
+            #         total_hits[h].append(i)
+
+            # for region_idx, contact, intersect_p in contact_info_gt:
+            """
+            for region_idx, contact, intersect_p in closest_intersection:
+                if contact:
+                    print(f"Arrow {i} makes contact with mask {region_idx} at points: {intersect_p}.")
+                    print(intersect_p)
+                    print("===========================")
+                    intersection_points_all.append(intersect_p)
+                else:
+                    print(f"Arrow {i} doesn't make contact with mask {region_idx}.")
+            """
+
+            region_idx = closest_intersection[0]
+            contact = closest_intersection[1]
+            intersect_p = closest_intersection[2]
+        
             if contact:
-                print(f"Arrow {i} makes contact with mask {region_idx} at points: {intersection_points}.")
-                intersection_points_all.extend(intersection_points)
+                print(f"Arrow {i} makes contact with mask {region_idx} at points: {intersect_p}.")
+                # print(intersect_p)
+                print("===========================")
+                intersection_points_all.append(intersect_p)
             else:
                 print(f"Arrow {i} doesn't make contact with mask {region_idx}.")
+        
+        print(f"Intersection points all:, {intersection_points_all}")
+    
+    # print(intersection_points_all)
+    # print(len(intersection_points_all))
+    # sys.exit()
     
     # print(total_hits)
     if len(total_hits) == len(gt_masks):
         print("All affordances met.")
+    # sys.exit()
     
     # Sanity check for intersection points
     valid_intersection_points = sanity_check_intersection_points(intersection_points_all, pcd)
@@ -358,6 +430,8 @@ def vis_results(pcd,
         sphere.paint_uniform_color([1, 0, 0])  # Color the intersection points red
         sphere.translate(point)
         intersection_spheres.append(sphere)
+    
+    # sys.exit()
 
     # Geometries are added to the visualizer in a loop
     geoms_list = [pcd, *tips, *targets, *arrows, *intersection_spheres]
