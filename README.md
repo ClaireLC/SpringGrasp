@@ -57,7 +57,45 @@ root directory
   └── verify_grasp_robot.py  // verifying pregrasp on hardware, kuka iiwa14 + left allegro hand.
 ```
 
-## Usage
+## Usage (SpringGrasp + Evaluation Metrics)
+### Plan grasp for pre-scanned objects
+#### Original SpringGrasp
+```
+python optimize_pregrasp_.py --exp_name <obj_name>
+```
+```
+python viz_utils_.py <file_name_here>
+```
+
+#### Modified SpringGrasp
+The `optimize_pregrasp.py` and `viz_utils.py` has been modified. I recommend cloning the entire branch for smooth transition. I renamed the original `optimize_pregrasp.py` as `optimize_pregrasp_.py` and `viz_utils.py` as `viz_utils_.py`. In the `func_grasp_junho` branch, `optimize_pregrasp.py` and `viz_utils.py` are both modified versions.
+
+1. Clone `func_grasp_junho` branch.
+2. Run `python optimize_pregrasp.py`
+
+### Customized object
+#### Plan and visualize grasp
+The objects are controlled through `OBJ_NAME` and `OBJ_NUM`. This will modify the `--npz_path ` argument within the file.  (line 192)
+
+For now, all the objects collected and annotated through Affcorrs is in `juno/u/junhokim/code/zed_redis/pcd_data/`, and the `--npz_path` argument is set to this directory. Even though the objects are in my folder, `--npz_path` should correctly allow you to read the data.
+
+The `ann_gt_pcd.npz` file is the annotated ground truth point cloud data which is generated from `e2_ann_corr_chamfer.py` in the `Affcorrs` directory. This is within the `/juno/u/junhokim/code/zed_redis/pcd_data/{OBJ_NAME}/{OBJ_NUM}/`.
+
+If you want to run SpringGrasp on different categories and types of objects, modify the `OBJ_NAME` and `OBJ_NUM` in the  `optimize_pregrasp.py` file. (line 172~174)
+```
+python optimize_pregrasp.py
+```
+#### Saved Optimized Grasps
+The save path is controlled by `--exp_name` argument (line 181). Currently it is set to `/juno/u/junhokim/code/SpringGrasp/data/grasp/{OBJ_NAME}/{OBJ_NUM}/`. The directory is controlled by `OBJ_NAME` and `OBJ_NUM`, so the parent directory should not matter as long as it is a valid path.
+
+#### Visualize Hit or Miss & SpringGrasp vectors(Metric 3)
+1. Change `GRASP_CALLER` to `True`
+```
+python optimiza_pregrasp.py
+```
+The modified `viz_utils.py` is called when `GRASP_CALLER` is set to `True`. It calls `viz_simple()` in line 308 to call `viz_utils.py` without re-running the entire optimization process again.
+
+## Usage (original SpringGrasp)
 ### Plan grasp for pre-scanned objects
 #### Process pointcloud
 ```

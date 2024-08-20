@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 
 """
-0: red
-1: green
+0: red (index)
+1: green (middle)
 2: blue
-3: yellow
+3: yellow (thumb)
 """
 
 from utils.create_arrow import create_direct_arrow
@@ -39,7 +39,7 @@ def load_affordance_pcd(pcd_path):
     pcd = o3d.geometry.PointCloud() # pcd object init
     pcd.points = o3d.utility.Vector3dVector(pts_wf)
     unique_labels = np.unique(aff_labels) # color map
-    label_colors = matplotlib.colormaps.get_cmap('Set2')
+    label_colors = matplotlib.colormaps.get_cmap('Set2') 
 
     label_color_map = np.array([label_colors(i) for i in range(len(unique_labels))])[:, :3]
     label_colors_rgb = label_color_map[aff_labels.astype(int)]
@@ -49,7 +49,7 @@ def load_affordance_pcd(pcd_path):
     
     return pcd, mask_seperate
 
-def sanity_check_intersection_points(intersection_points, pcd, threshold=0.004):
+def validate_interesect_points(intersection_points, pcd, threshold=0.004):
     original_points = np.asarray(pcd.points)
     valid_points = []
     for point in intersection_points:
@@ -62,107 +62,42 @@ def sanity_check_intersection_points(intersection_points, pcd, threshold=0.004):
 
     return valid_points
 
-# def adjust_ray_length(arrow_start, arrow_end, max_length):
-#     direction = arrow_end - arrow_start
-#     length = np.linalg.norm(direction)
-    
-#     if length > max_length:
-#         direction = direction / length  # Normalize the direction
-#         arrow_end = arrow_start + direction * max_length
-    
-#     return arrow_start, arrow_end
-
-def check_vector_intersection_points(arrow_start, arrow_end, pcd):
+def pcd_to_grasp_intersection(arrow_start, arrow_end, pcd):
     # Estimate normals for the point cloud
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
+    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30))
     
     # Convert point cloud to mesh using BPA
     distances = pcd.compute_nearest_neighbor_distance()
     avg_dist = np.mean(distances)
-    radius = 3 * avg_dist
+    std_dist = np.std(distances)
+    radius = max(3 * avg_dist, avg_dist + 3 * std_dist)
     bpa_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-                pcd,
-                o3d.utility.DoubleVector([radius, radius * 2]))
-
-    max_length = 0.2
-    # arrow_start, arrow_end = adjust_ray_length(arrow_start, arrow_end, max_length)
+        pcd,
+        o3d.utility.DoubleVector([radius, radius * 2]))
     
     # Compute direction and length of the arrow
     direction = arrow_end - arrow_start
     length = np.linalg.norm(direction)
     direction /= length
     
-    # Create rays from the arrow start to the arrow end
+    # Create rays from the arrow
     rays = o3d.core.Tensor([[*arrow_start, *direction]], dtype=o3d.core.Dtype.Float32)
-    # rays = o3d.core.Tensor([[*arrow_start, *direction, 1]], dtype=o3d.core.Dtype.Float32)
+    bpa_mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(bpa_mesh) # Convert mesh to Open3D
     
-    # Convert mesh to Open3D tensor
-    bpa_mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(bpa_mesh)
-    
-    # Perform ray casting
+    # Ray casting
     raycasting_scene = o3d.t.geometry.RaycastingScene()
     mesh_id = raycasting_scene.add_triangles(bpa_mesh_t)
     ans = raycasting_scene.cast_rays(rays)
 
-    # print(ans)
-    # print(type(ans))
-    
-    # Check if there is an intersection
+    # Check for intersection
     hit = ans['t_hit'].isfinite()
     if not hit.any().item():
-        return False, None  # Return False if no intersection is found
-
-    # print(hit)
-    # print(type(hit))
-    # sys.exit()
-    
-    # Compute the first intersection point
-    # t_hit = ans['t_hit'][hit].numpy()
-    # first_t_hit = np.min(t_hit)
-    
-    # if first_t_hit > max_length:
-    #     return False, None  # No valid intersection within max_length
-    
-    # first_intersection_point_mesh = arrow_start + first_t_hit * direction
-    
-    # # Find the corresponding point in the original point cloud
-    # original_points = np.asarray(pcd.points)
-    # distances = np.linalg.norm(original_points - first_intersection_point_mesh, axis=1)
-    # closest_point_index = np.argmin(distances)
-    # intersection_points_pcd = original_points[closest_point_index]
-    
-    # Compute intersection points manually
-    """
-    t_hit = ans['t_hit'][hit].numpy()
-    intersection_points_mesh = arrow_start + t_hit[:, None] * direction
-    """
-
-    # Filter out intersection points that are beyond max_length
-    # valid_intersection_points_mesh = []
-    # for t in t_hit:
-    #     if t <= max_length:
-    #         valid_intersection_points_mesh.append(arrow_start + t * direction)
-    
-    """
-    # Find the corresponding points in the original point cloud
-    original_points = np.asarray(pcd.points)
-    intersection_points_pcd = []
-    for point in intersection_points_mesh:
-        distances = np.linalg.norm(original_points - point, axis=1)
-        closest_point_index = np.argmin(distances)
-        intersection_points_pcd.append(original_points[closest_point_index])
-    
-    return True, intersection_points_pcd  # Return True and the list of intersection points
-    """
+        return False, None  # False if no intersection
 
     # Compute the first intersection point
     t_hit = ans['t_hit'][hit].numpy()
     first_t_hit = np.min(t_hit)
-    
-    # if first_t_hit > max_length:
-    #     return False, None  # No valid intersection within max_length
-    if not first_t_hit:
-        return False, None
+    if not first_t_hit: return False, None
     
     first_intersection_point_mesh = arrow_start + first_t_hit * direction
     
@@ -172,11 +107,8 @@ def check_vector_intersection_points(arrow_start, arrow_end, pcd):
     closest_point_index = np.argmin(distances)
     intersection_points_pcd = original_points[closest_point_index]
 
-    print("=========================== intersection_points_pcd")
-    print(intersection_points_pcd)
-    # print(type(intersection_points_pcd))
-    # print(len(intersection_points_pcd))
-    # print("===========================")
+    # print("=========================== intersection_points_pcd")
+    # print(intersection_points_pcd)
 
     return True, intersection_points_pcd
 
@@ -189,11 +121,8 @@ def check_arrow_contact_with_pcd(arrow_start, arrow_end, pcd):
     avg_dist = np.mean(distances)
     radius = 3 * avg_dist
     bpa_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-        pcd,
-        o3d.utility.DoubleVector([radius, radius * 2])
-    )
-    
-    # arrow_start, arrow_end = adjust_ray_length(arrow_start, arrow_end, 0.5)
+        pcd, 
+        o3d.utility.DoubleVector([radius, radius * 2]))
 
     # Compute direction and length of the arrow
     direction = arrow_end - arrow_start
@@ -202,7 +131,6 @@ def check_arrow_contact_with_pcd(arrow_start, arrow_end, pcd):
     
     # Create rays from the arrow start to the arrow end
     rays = o3d.core.Tensor([[*arrow_start, *direction]], dtype=o3d.core.Dtype.Float32)
-    # rays = o3d.core.Tensor([[*arrow_start, *direction, 1]], dtype=o3d.core.Dtype.Float32)
     
     # Convert mesh to Open3D tensor
     bpa_mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(bpa_mesh)
@@ -217,17 +145,8 @@ def check_arrow_contact_with_pcd(arrow_start, arrow_end, pcd):
     return hit.any().item()  # Return True if any intersection is found
 
 
-def check_arrow_contact_with_mask_regions(arrow_start, 
-                                          arrow_end, 
-                                          mask_regions, 
-                                          pcd,
-                                          arrow_idx,):
+def check_grasp_intersection(arrow_start, arrow_end, mask_regions, pcd, arrow_idx,):
     contact_info = []
-    # print(type(mask_regions))
-    # print(len(mask_regions)) # 2
-    # color_map = plt.get_cmap('tab20')  # Using tab20 colormap for distinct colors
-    # num_colors = color_map.N
-
     hits = []
     for region_idx, mask in enumerate(mask_regions):
         # Get the indices of the points that belong to this mask
@@ -240,13 +159,12 @@ def check_arrow_contact_with_mask_regions(arrow_start,
         masked_pcd.points = o3d.utility.Vector3dVector(masked_points)
 
         # Check if the arrow intersects with this masked point cloud
-        contact, intersection_points = check_vector_intersection_points(arrow_start,
-                                                                        arrow_end, 
-                                                                        masked_pcd)
+        contact, intersection_points = pcd_to_grasp_intersection(arrow_start,
+                                                                 arrow_end, 
+                                                                 masked_pcd)
         if contact:
-            print("================= region, contact")
-            print(region_idx, intersection_points)
-            # print("======================")
+            # print("================= region, contact")
+            # print(region_idx, intersection_points)
             hits.append(region_idx)
 
         contact_info.append((region_idx, contact, intersection_points))
@@ -336,10 +254,12 @@ def vis_results(pcd,
     # Get geometries to visualize grasp
     tips, targets, arrows = vis_grasp(init_ftip_pos, target_ftip_pos)
 
-    intersection_points_all = []
+    all_intersect_points = []
+    finger_to_region = [None] * 4
     total_hits = defaultdict(list)
+    num_intersection = 0
     for i in range(len(arrows)):
-        print(f"Arrrow num: {i}")
+        # print(f"Arrrow num: {i}")
         if torch.is_tensor(init_ftip_pos[i]):
             arrow_start = init_ftip_pos[i].cpu().detach().numpy()
         else:
@@ -350,82 +270,59 @@ def vis_results(pcd,
             arrow_end = target_ftip_pos[i]
 
         # Check contact with each gt mask
-        contact_info_gt, hits = check_arrow_contact_with_mask_regions(arrow_start, 
-                                                                      arrow_end, 
-                                                                      gt_masks, 
-                                                                      pcd, 
-                                                                      i,)
-        # print(type(contact_info_gt))
-        # print(len(contact_info_gt))
-        print("========== CONTACT INFO GT: ========")
-        print(contact_info_gt)
-        # sys.exit()
+        contact_info_gt, hits = check_grasp_intersection(arrow_start, 
+                                                         arrow_end, 
+                                                         gt_masks, 
+                                                         pcd, 
+                                                         i,)
+        # print("========== CONTACT INFO GT: ========")
+        # print(f"Arrow num: {i}: {contact_info_gt}")
 
         # Filter out invalid intersections
         valid_intersections = [x for x in contact_info_gt if x[2] is not None]
         if valid_intersections:
             closest_intersection = min(valid_intersections, key=lambda x: np.linalg.norm(arrow_start - x[2]))
-            print("================ closest intersection")
-            print(closest_intersection)
-            # sys.exit()
-            # intersection_points_all.append(closest_intersection[0])
-            print("================ hits")
-            # if closest_intersection:
-            #     hits = []
-            #     hits.append(closest_intersection[0])
-
+            # print("================ closest intersection")
+            # print(closest_intersection)
+            # print("================ hits")
             if closest_intersection[1]:
                 hit_region = closest_intersection[0]
-                # print(type(hit_region), hit_region)
                 total_hits[hit_region].append(i)
-
-
-            # if len(hits) > 0:
-            #     for h in hits:
-            #         total_hits[h].append(i)
-
-            # for region_idx, contact, intersect_p in contact_info_gt:
-            """
-            for region_idx, contact, intersect_p in closest_intersection:
-                if contact:
-                    print(f"Arrow {i} makes contact with mask {region_idx} at points: {intersect_p}.")
-                    print(intersect_p)
-                    print("===========================")
-                    intersection_points_all.append(intersect_p)
-                else:
-                    print(f"Arrow {i} doesn't make contact with mask {region_idx}.")
-            """
 
             region_idx = closest_intersection[0]
             contact = closest_intersection[1]
             intersect_p = closest_intersection[2]
         
             if contact:
-                print(f"Arrow {i} makes contact with mask {region_idx} at points: {intersect_p}.")
-                # print(intersect_p)
-                print("===========================")
-                intersection_points_all.append(intersect_p)
+                print(f"Arrow {i} makes contact with mask {region_idx} at point: {intersect_p}.")
+                num_intersection += 1
+                finger_to_region[i] = region_idx
+                # print("===========================")
+                all_intersect_points.append(intersect_p)
             else:
                 print(f"Arrow {i} doesn't make contact with mask {region_idx}.")
         
-        print(f"Intersection points all:, {intersection_points_all}")
+    # print(f"Intersection points all:, {all_intersect_points}")
     
-    # print(intersection_points_all)
-    # print(len(intersection_points_all))
-    # sys.exit()
-    
-    # print(total_hits)
+    print(f"Total hits: {total_hits}")
     if len(total_hits) == len(gt_masks):
         print("All affordances met.")
-    # sys.exit()
     
+    blind_hits = num_intersection / len(arrows) # Rate
+    thumb_to_index = bool # If thumb finger and index finger are in separate affordance regions
+    if isinstance(finger_to_region[0], int) and isinstance(finger_to_region[3], int) and finger_to_region[0] != finger_to_region[3]:
+        thumb_to_index = True
+    else:
+        thumb_to_index = False
+    print(f"Blind Hit Rate: {blind_hits} | Thumb2Index: {thumb_to_index}")
+
     # Sanity check for intersection points
-    valid_intersection_points = sanity_check_intersection_points(intersection_points_all, pcd)
-    # print(len(valid_intersection_points))
+    valid_intersection_points = validate_interesect_points(all_intersect_points, pcd)
+    # print(valid_intersection_points)
 
     # Create spheres for intersection points
     intersection_spheres = []
-    for point in intersection_points_all:
+    for point in all_intersect_points:
         sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.002)
         sphere.paint_uniform_color([1, 0, 0])  # Color the intersection points red
         sphere.translate(point)
