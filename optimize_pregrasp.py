@@ -405,7 +405,7 @@ if __name__ == "__main__":
                 o3d.io.write_point_cloud(save_path, fitted_pcd)  
         quit()
 
-    #! IS THE INITIAL TIP POSE HARD CODED -> Based on reference paper
+    #! THE INITIAL TIP POSE HARD CODED -> Based on reference paper
     init_tip_pose = torch.tensor([[[0.05, 0.05, 0.02],
                                    [0.06, -0.0, -0.01],
                                    [0.03, -0.04, 0.0],
@@ -491,6 +491,9 @@ if __name__ == "__main__":
                                                                 grasp_optimizer, 
                                                                 device,)
     
+    if not os.path.exists(args.exp_name):
+        os.makedirs(args.exp_name)
+    
     # Save initial pose info
     if args.npz_path is not None:
         data_dict = {
@@ -516,32 +519,30 @@ if __name__ == "__main__":
                                 # wrist_frame="original",)
         quit()
     
-    print("start_tip_pose")
-    print(init_start_ftip_pos)
-    print("================================================")
+    # print("start_tip_pose")
+    # print(init_start_ftip_pos)
+    # print("================================================")
 
-    print("target_tip_pose")
-    print(target_pose)
-    print("================================================")
+    # print("target_tip_pose")
+    # print(target_pose)
+    # print("================================================")
 
-    print("palm_pose")
-    print(init_wrist_poses)
-    print("================================================")
+    # print("palm_pose")
+    # print(init_wrist_poses)
+    # print("================================================")
 
-    print("input_path")
-    print(args.npz_path)
-    print("================================================")
+    # print("input_path")
+    # print(args.npz_path)
+    # print("================================================")
 
-    print("compliance")
-    print(compliance)
-    print("================================================")
+    # print("compliance")
+    # print(compliance)
+    # print("================================================")
 
-    print("joint_angles")
-    print(init_joint_angles)
-    print("================================================")
-
+    # print("joint_angles")
+    # print(init_joint_angles)
+    # print("================================================")
     # sys.exit()
-
 
     
     # Run optimization
@@ -565,9 +566,8 @@ if __name__ == "__main__":
                                                     verbose=True,)
     
     # Get feasible idx
-    #! It is using stableness to calculate feasibility, not the 
-    #! alignment with affordances. The affordance implementation
-    #! is just for the ranking of the outputs
+    # It is using stableness to calculate feasibility, not the 
+    # alignment with affordances.
     idx_list = []
     for i in range(opt_tip_pose.shape[0]):
         if opt_margin[i].min() > 0.0:

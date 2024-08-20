@@ -63,6 +63,7 @@ def validate_interesect_points(intersection_points, pcd, threshold=0.004):
     return valid_points
 
 def pcd_to_grasp_intersection(arrow_start, arrow_end, pcd):
+    """ Version 1
     # Estimate normals for the point cloud
     pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30))
     
@@ -71,9 +72,12 @@ def pcd_to_grasp_intersection(arrow_start, arrow_end, pcd):
     avg_dist = np.mean(distances)
     std_dist = np.std(distances)
     radius = max(3 * avg_dist, avg_dist + 3 * std_dist)
+
+    #TODO: Change the Ball-Pivoting Algorithm to robust reconstruction algorithm
+    # Poisson surface reconstruction, Alpha shapes, Marching cubes
     bpa_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-        pcd,
-        o3d.utility.DoubleVector([radius, radius * 2]))
+                        pcd,
+                        o3d.utility.DoubleVector([radius, radius * 2]))
     
     # Compute direction and length of the arrow
     direction = arrow_end - arrow_start
@@ -83,7 +87,52 @@ def pcd_to_grasp_intersection(arrow_start, arrow_end, pcd):
     # Create rays from the arrow
     rays = o3d.core.Tensor([[*arrow_start, *direction]], dtype=o3d.core.Dtype.Float32)
     bpa_mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(bpa_mesh) # Convert mesh to Open3D
-    
+    """
+
+    # Estimate normals for the pcd
+    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.2, max_nn=40))
+    distances = pcd.compute_nearest_neighbor_distance()
+    avg_dist = np.mean(distances)
+    std_dist = np.std(distances)
+
+    #
+    result = pcd.voxel_down_sample_and_trace(voxel_size=avg_dist*0.5, 
+                                         min_bound=pcd.get_min_bound(), 
+                                         max_bound=pcd.get_max_bound(), 
+                                         approximate_class=True)
+
+    pcd_dense = result[0]  # pcd
+    cluster_labels = pcd_dense.cluster_dbscan(eps=avg_dist*0.5, min_points=1)
+
+    # Recompute distances for the denser pcd
+    distances_dense = pcd_dense.compute_nearest_neighbor_distance()
+    avg_dist_dense = np.mean(distances_dense)
+    std_dist_dense = np.std(distances_dense)
+
+    # Adjust the radius calculation for potentially denser meshing
+    radius = max(2 * avg_dist_dense, avg_dist_dense + 2 * std_dist_dense)
+
+    # Ball-Pivoting Algorithm (pcd to mesh)
+    bpa_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                        pcd_dense,
+                        o3d.utility.DoubleVector([radius * 0.5, radius, radius * 1.5]))
+
+    # Post-process mesh to improve quality
+    bpa_mesh.remove_degenerate_triangles()
+    bpa_mesh.remove_duplicated_triangles()
+    bpa_mesh.remove_duplicated_vertices()
+    bpa_mesh.remove_non_manifold_edges()
+
+    # Compute arrow
+    direction = arrow_end - arrow_start
+    length = np.linalg.norm(direction)
+    direction /= length
+
+    # Create rays from the arrow
+    rays = o3d.core.Tensor([[*arrow_start, *direction]], dtype=o3d.core.Dtype.Float32)
+    bpa_mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(bpa_mesh) # mesh to Open3D
+
+
     # Ray casting
     raycasting_scene = o3d.t.geometry.RaycastingScene()
     mesh_id = raycasting_scene.add_triangles(bpa_mesh_t)
@@ -112,48 +161,12 @@ def pcd_to_grasp_intersection(arrow_start, arrow_end, pcd):
 
     return True, intersection_points_pcd
 
-def check_arrow_contact_with_pcd(arrow_start, arrow_end, pcd):
-    # Estimate normals for the point cloud
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
-    
-    # Convert point cloud to mesh using BPA
-    distances = pcd.compute_nearest_neighbor_distance()
-    avg_dist = np.mean(distances)
-    radius = 3 * avg_dist
-    bpa_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-        pcd, 
-        o3d.utility.DoubleVector([radius, radius * 2]))
-
-    # Compute direction and length of the arrow
-    direction = arrow_end - arrow_start
-    length = np.linalg.norm(direction)
-    direction /= length
-    
-    # Create rays from the arrow start to the arrow end
-    rays = o3d.core.Tensor([[*arrow_start, *direction]], dtype=o3d.core.Dtype.Float32)
-    
-    # Convert mesh to Open3D tensor
-    bpa_mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(bpa_mesh)
-    
-    # Perform ray casting
-    raycasting_scene = o3d.t.geometry.RaycastingScene()
-    raycasting_scene.add_triangles(bpa_mesh_t)
-    ans = raycasting_scene.cast_rays(rays)
-    
-    # Check if there is an intersection
-    hit = ans['t_hit'].isfinite()
-    return hit.any().item()  # Return True if any intersection is found
-
 
 def check_grasp_intersection(arrow_start, arrow_end, mask_regions, pcd, arrow_idx,):
     contact_info = []
     hits = []
     for region_idx, mask in enumerate(mask_regions):
-        # Get the indices of the points that belong to this mask
-        # idxs_y, idxs_x = mask.nonzero()
-
-        # Extract the corresponding points from the point cloud
-        # masked_points = np.asarray(pcd.points)[idxs_y]
+        # Extract the grouth truth mask from the point cloud
         masked_points = np.asarray(pcd.points)[mask]
         masked_pcd = o3d.geometry.PointCloud()
         masked_pcd.points = o3d.utility.Vector3dVector(masked_points)
@@ -173,6 +186,7 @@ def check_grasp_intersection(arrow_start, arrow_end, mask_regions, pcd, arrow_id
 
 
 def vis_grasp(tip_pose, target_pose): # torch.Size([4, 3])
+    """ Connects pre-grasp point to post-grasp point. """
     if torch.is_tensor(tip_pose):
         tip_pose = tip_pose.cpu().detach().numpy().squeeze()
     if torch.is_tensor(target_pose):
@@ -235,7 +249,7 @@ def vis_results(pcd,
                 save_path=None,
                 pcd_path=None):
     
-    # Load gt affordance mask
+    # Load ground truth affordance mask
     if pcd_path:
         print(pcd_path)
         pcd_n, gt_masks = load_affordance_pcd(pcd_path)
@@ -258,6 +272,7 @@ def vis_results(pcd,
     finger_to_region = [None] * 4
     total_hits = defaultdict(list)
     num_intersection = 0
+
     for i in range(len(arrows)):
         # print(f"Arrrow num: {i}")
         if torch.is_tensor(init_ftip_pos[i]):
@@ -270,11 +285,8 @@ def vis_results(pcd,
             arrow_end = target_ftip_pos[i]
 
         # Check contact with each gt mask
-        contact_info_gt, hits = check_grasp_intersection(arrow_start, 
-                                                         arrow_end, 
-                                                         gt_masks, 
-                                                         pcd, 
-                                                         i,)
+        contact_info_gt, hits = check_grasp_intersection(arrow_start, arrow_end, 
+                                                         gt_masks, pcd, i,)
         # print("========== CONTACT INFO GT: ========")
         # print(f"Arrow num: {i}: {contact_info_gt}")
 
