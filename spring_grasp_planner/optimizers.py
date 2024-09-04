@@ -5,9 +5,11 @@ import time
 from functools import partial
 from differentiable_robot_model.robot_model import DifferentiableRobotModel
 from utils.math_utils import minimum_wrench_reward, euler_angles_to_matrix
+import wandb
 
 from .initial_guesses import *
 from .metric import *
+import spring_grasp_planner.func_metrics as f_metrics
 
 device = torch.device("cpu")
 
@@ -627,7 +629,8 @@ class SpringGraspOptimizer:
         mass = 0.1,
         com = [0.0, 0.0, 0.0],
         num_samples = 10,
-        weight_config = None
+        weight_config = None,
+        conf=None,
     ):
         """
         Initialize optimization parameters
@@ -654,6 +657,7 @@ class SpringGraspOptimizer:
             num_samples: number of points along contact neighborhood line segment
                 when computing uncertainty loss term
             weight_config: if specified, initial weights to use
+            conf: args from optimization_pregrasp.py
         """
         self.ref_q = torch.tensor(ref_q).to(device)
         self.robot_model = DifferentiableRobotModel(robot_urdf, device=device)
@@ -676,35 +680,45 @@ class SpringGraspOptimizer:
         self.com = com
         self.gravity = gravity
         self.num_samples = num_samples
-        # Different weights, shoudl load from config.
+
+        # If no weight_config specified, use defaults
         if weight_config is None:
-            self.w_sp = 200.0
-            self.w_dist = 10000.0
-            self.w_uncer = 20.0
-            self.w_gain = 0.5
-            self.w_tar = 1000.0
-            self.w_col = 1.0
-            self.w_reg = 10.0
-            self.w_force = 200.0
-        else:
-            self.w_sp = weight_config["w_sp"]
-            self.w_dist = weight_config["w_dist"]
-            self.w_uncer = weight_config["w_uncer"]
-            self.w_gain = weight_config["w_gain"]
-            self.w_tar = weight_config["w_tar"]
-            self.w_col = weight_config["w_col"]
-            self.w_reg = weight_config["w_reg"]
-            self.w_force = weight_config["w_force"]
+            weight_config = {
+                "w_sp": 200.0,
+                "w_dist": 10000.0,
+                "w_uncer": 20.0,
+                "w_gain": 0.5,
+                "w_tar": 1000.0,
+                "w_col": 1.0,
+                "w_reg": 10.0,
+                "w_force": 200.0,
+                "w_pre_dist": 50.0,
+                "w_palm_dist": 1.0,
+                "w_func": 0.0,
+            }
+        self.weights = weight_config
+
+        # Initialize loss variables
+        self.total_loss = np.nan
+        self.losses = {
+            "loss_sp": np.nan,
+            "loss_dist" : np.nan,
+            "loss_uncer": np.nan,
+            "loss_gain": np.nan,
+            "loss_tar": np.nan,
+            "loss_col": np.nan,
+            "loss_reg": np.nan,
+            "loss_force": np.nan,
+            "loss_pre_dist": np.nan,
+            "loss_palm_dist": np.nan,
+            "loss_func": np.nan,
+        }
+
+        self.conf = conf
+        self.log = self.conf.log
         # Print out the weight configuration
         print("========Weight Configuration:========")
-        print("w_sp:", self.w_sp)
-        print("w_dist:", self.w_dist)
-        print("w_uncer:", self.w_uncer)
-        print("w_gain:", self.w_gain)
-        print("w_tar:", self.w_tar)
-        print("w_col:", self.w_col)
-        print("w_reg:", self.w_reg)
-        print("w_force:", self.w_force)
+        print(self.weights)
         print("=====================================")
 
     def forward_kinematics(self, joint_angles, palm_poses=None, link_names=None):
@@ -826,13 +840,38 @@ class SpringGraspOptimizer:
         dist_cost = torch.abs(dist).sum(dim=1) # E_dist: make contact pos be on object surface
         tar_dist_cost = tar_dist.sum(dim=1) # E_tar: make target pos be inside object
 
+        # Fill loss dict
+        self.losses["loss_sp"] = c * self.weights["w_sp"]
+        self.losses["loss_dist"] = dist_cost * self.weights["w_dist"]
+        self.losses["loss_tar"] = tar_dist_cost * self.weights["w_tar"]
+        self.losses["loss_force"] = force_cost * self.weights["w_force"]
+        self.losses["loss_reg"] = reg_cost * self.weights["w_reg"]
+        self.losses["loss_gain"] = self.weights["w_gain"] * compliance.sum(dim=1)
+
         # Total loss
-        l = c * self.w_sp + dist_cost * self.w_dist + tar_dist_cost * self.w_tar + \
-            force_cost * self.w_force + reg_cost * self.w_reg + self.w_gain * compliance.sum(dim=1)
+        l = self.losses["loss_sp"] + \
+            self.losses["loss_dist"] + \
+            self.losses["loss_tar"] + \
+            self.losses["loss_force"] + \
+            self.losses["loss_reg"] + \
+            self.losses["loss_gain"]
+
         #print("All costs:", float(c.mean()), float(dist_cost.mean()), float(tar_dist_cost.mean()), float(center_cost.mean()), float(force_cost.mean()), float(ref_cost.mean()), float(variance_cost.mean()), float(reg_cost.mean()))
         return l, margin, R, t, contact_prob
 
-    def closure(self, joint_angles, compliance, target_pose, palm_poses, palm_oris, friction_mu, gpis, num_envs):
+    def closure(
+        self,
+        joint_angles,
+        compliance,
+        target_pose,
+        palm_poses,
+        palm_oris,
+        friction_mu,
+        gpis,
+        num_envs,
+        pts=None,
+        aff_labels=None,
+    ):
         """
         Compute total loss
 
@@ -844,6 +883,9 @@ class SpringGraspOptimizer:
             palm_oris: palm orientations
             friction_mu: friction coefficients
             gpis: GPIS of object
+            num_envs: number of initial conditions
+            pts: object point cloud [N, 3]
+            aff_labels: affordance labels [N,]
         """
         self.optim.zero_grad()
         palm_posori = torch.hstack([palm_poses, palm_oris])
@@ -860,7 +902,7 @@ class SpringGraspOptimizer:
 
         # Compute task loss (E_sp, E_dist, E_gain, E_tar, E_reg)
         # contact_prob: probability of contact at all_tip_pose (contact pos)
-        l, margin, R, t, contact_prob = self.compute_loss(
+        task_loss, margin, R, t, contact_prob = self.compute_loss(
             all_tip_pose, # [num_envs*num_coeffs, 4, 3]
             joint_angles.repeat(len(self.pregrasp_coefficients), 1), 
             target_pose_extended, 
@@ -869,7 +911,6 @@ class SpringGraspOptimizer:
             gpis,
         )
         self.R, self.t = R, t
-        task_loss = l
         self.total_margin = (self.pregrasp_weights.view(-1,1,1) * margin.view(-1, num_envs, 4)).sum(dim=0)
 
         # Compute E_uncer (Eqn. (10))
@@ -885,41 +926,93 @@ class SpringGraspOptimizer:
         contact_prob = (contact_prob.unsqueeze(2) / normalization_factor).unsqueeze(1) # [num_envs, 1, 4, 1]
         total_prominence = (contact_prob - sample_prob).sum(dim=1).squeeze(-1) # [num_envs, 4]
         prominence_loss = total_prominence.sum(dim=1) # NOTE: Variance loss
-        total_loss = -prominence_loss * self.w_uncer # NOTE: Variance loss
+        self.losses["loss_uncer"] = -prominence_loss * self.weights["w_uncer"] # NOTE: Variance loss
 
-        # Add task loss
-        total_loss += task_loss
-
-        # TODO ??
+        # Loss for pre-grasp fingetip position distances
         pre_dist, _ = gpis.pred(self.pregrasp_tip_pose)
-        pre_dist_loss = -pre_dist.sum(dim=1) * 50.0 # NOTE: Experimental
-        total_loss += pre_dist_loss # Ignored for now
+        self.losses["loss_pre_dist"] = -pre_dist.sum(dim=1) * self.weights["w_pre_dist"] # NOTE: Experimental
 
         # Collision loss terms
-
         # Palm to object distance
         if self.optimize_palm:
             palm_dist,_ = gpis.pred(palm_poses)
             palm_dist = palm_dist
             palm_dist_loss = 1/palm_dist # Need to ensure palm is outside the object.
-            total_loss += palm_dist_loss
+            self.losses["loss_palm_dist"] = palm_dist_loss
             #print("palm dist:", float(palm_dist.mean()))
-
+        else:
+            self.losses["loss_palm_dist"] = 0
         # Hand object collision loss
         link_pos = self.forward_kinematics(joint_angles, palm_posori, link_names=["link_1.0", "link_2.0", "link_3.0",
                                                                                   "link_5.0", "link_6.0", "link_7.0",
                                                                                   "link_9.0", "link_10.0", "link_11.0"])
         link_dist,_ = gpis.pred(link_pos)
         link_dist_loss = (1/link_dist).sum(dim=1) * 0.01
-        total_loss += link_dist_loss * self.w_col
-        
-        total_loss += self.compute_collision_loss(joint_angles, palm_posori) * self.w_col
+
+        self.losses["loss_col"] = self.weights["w_col"] * (link_dist_loss + self.compute_collision_loss(joint_angles, palm_posori))
+
+        # Compute functional grasp loss term
+        if self.conf.func_metric_name is not None:
+            if pts is None: raise ValueError(
+                "Cannot compute functional grasp loss. No input points provided."
+            )
+            if aff_labels is None: raise ValueError(
+                "Cannot compute functional graps loss. No affordance labels provided."
+            )
+
+            pts_batched = pts.repeat(num_envs, 1, 1) # [N, 3] --> [num_envs, N, 3]
+            aff_labels_batched = aff_labels.repeat(num_envs, 1) # [N] --> [num_envs, N]
+
+            if self.conf.func_metric_name == "contactgrasp":
+                if self.conf.func_finger_pts == "pregrasp":
+                    func_finger_pts = pregrasp_tip_pose_extended
+                elif self.conf.func_finger_pts == "contact":
+                    func_finger_pts = all_tip_pose
+                elif self.conf.func_finger_pts == "target":
+                    func_finger_pts = target_pose_extended
+                else:
+                    raise ValueError
+
+                func_cost = f_metrics.contactgrasp_metric(
+                    gpis,
+                    pts_batched,
+                    pregrasp_tip_pose_extended,  # [num_envs, 4, 3]
+                    aff_labels_batched,
+                    w_pos=self.conf.func_contactgrasp_w_pos,
+                    w_neg=self.conf.func_contactgrasp_w_neg,
+                    dp_thresh=self.conf.func_contactgrasp_dp_thresh,
+                    dist_to_use=self.conf.func_contactgrasp_dist,
+                )
+            else:
+                raise ValueError(
+                    f"{self.conf.func_metric_name} is not a valid functional grasp metric name"
+                )
+
+            self.losses["loss_func"] = func_cost * self.weights["w_func"]
+        else:
+            self.losses["loss_func"] = torch.zeros(self.losses["loss_col"].shape)
+
+        # Compute total loss
+        total_loss = 0
+        for k, loss_val in self.losses.items():
+            total_loss += loss_val
         self.total_loss = total_loss
+
         loss = total_loss.sum() # TODO: TO BE FINISHED
         loss.backward()
         return loss
 
-    def optimize(self, init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True):
+    def optimize(
+        self,
+        init_joint_angles,
+        target_pose,
+        compliance,
+        friction_mu,
+        gpis,
+        pts=None,
+        aff_labels=None,
+        verbose=True,
+    ):
         """
         Solve optimization problem
 
@@ -967,7 +1060,9 @@ class SpringGraspOptimizer:
                     palm_oris=palm_oris, 
                     friction_mu=friction_mu, 
                     gpis=gpis,
-                    num_envs=num_envs
+                    num_envs=num_envs,
+                    pts=pts,
+                    aff_labels=aff_labels,
                 ))
             else:
                 loss = self.closure(
@@ -978,12 +1073,11 @@ class SpringGraspOptimizer:
                     palm_oris,
                     friction_mu,
                     gpis,
-                    num_envs
+                    num_envs,
+                    pts=pts,
+                    aff_labels=aff_labels,
                 )
-            if verbose:
-                print(f"Step {s} Loss:",float(self.total_loss.mean()))
-            if torch.isnan(self.total_loss.sum()):
-                print("NaN detected:", self.pregrasp_tip_pose, self.total_margin)
+
             with torch.no_grad():
                 update_flag = self.total_loss < opt_value
                 if update_flag.sum() and s>20:
@@ -999,7 +1093,45 @@ class SpringGraspOptimizer:
                 self.optim.step()
             with torch.no_grad():
                 compliance.clamp_(min=40.0) # prevent negative compliance
+
+            # End of epoch bookkeeping
+            if self.log:
+                # Log individual losses and total loss
+                log_dict = {"total_loss": self.total_loss.mean()}
+                for k, loss_val in self.losses.items():
+                    log_dict[k] = loss_val.mean()
+                log_to_wandb(log_dict, epoch=s)
+            if verbose:
+                print(f"Step {s} Loss:",float(self.total_loss.mean()))
+            if torch.isnan(self.total_loss.sum()):
+                print("NaN detected:", self.pregrasp_tip_pose, self.total_margin)
+
         print("Optimization time:", time.time() - start_ts)
         print("Margin:",opt_margin)
         return opt_joint_angle, opt_compliance, opt_target_pose, opt_palm_poses, opt_margin, opt_R, opt_t
-            
+    
+def log_to_wandb(log_dict_in, epoch=None):
+    """
+    Log to wandb
+
+    Args:
+        log_dict_in is a dict that can have up to one sub dict for each wandb panel
+            example:
+                {
+                    "set_name": {"total_loss": 1},
+                    "lr": 1e-4
+                }
+        epoch (int): epoch number
+    """
+
+    log_dict = {}
+    for k, v in log_dict_in.items():
+        if isinstance(v, dict):
+            for k_sub, v_sub in v.items():
+                log_dict[f"{k}/{k_sub}"] = v_sub
+        else:
+            log_dict[k] = v
+    if epoch is not None:
+        log_dict["epoch"] = epoch
+    wandb.log(log_dict)
+        

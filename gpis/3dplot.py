@@ -2,6 +2,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 #from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
+import torch
 
 from matplotlib import cm
 import matplotlib.patches as mpatches
@@ -11,10 +12,10 @@ from argparse import ArgumentParser
 from gpis import topcd
 
 parser = ArgumentParser()
-parser.add_argument("--data", type=str, default="gpis")
+parser.add_argument("--data", type=str)
 parser.add_argument("--stride", type=int, default=10)
-parser.add_argument("--axis", type=str, default="z")
-parser.add_argument("--isf_limit", type=float, default=0.2)
+parser.add_argument("--axis", type=str, default="z", choices=["z"])
+parser.add_argument("--isf_limit", type=float, default=0.05)
 parser.add_argument("--quiver_spacing", type=int, default=5)
 parser.add_argument("--query_point", type=float, nargs=3, default=None)
 
@@ -28,11 +29,12 @@ num_steps = test_mean.shape[0]
 bound = data["bound"]
 center = data["center"]
 
+
 vis_points, vis_normals, vis_var = topcd(
     test_mean,
     test_normal,
-    [-bound+center[0],-bound+center[1],-bound+center[2]],
-    [bound+center[0],bound+center[1],bound+center[2]],
+    data["lb"],
+    data["ub"],
     test_var=test_var,
     steps=num_steps,
 )
@@ -44,6 +46,8 @@ if args.axis == "x":
                     np.linspace(data["lb"][2],data["ub"][2],num_steps), indexing="xy")
     x_label = "y"
     y_label = "z"
+    xlim=(data["lb"][1], data["ub"][2])
+    ylim=(data["lb"][2], data["ub"][2])
     level_coords = np.meshgrid(
         np.linspace(data["lb"][0],data["ub"][0],num_steps), indexing="xy"
     )[0]
@@ -53,6 +57,8 @@ elif args.axis=="y":
                     np.linspace(data["lb"][2],data["ub"][2],num_steps), indexing="xy")
     x_label = "x"
     y_label = "z"
+    xlim=(data["lb"][0], data["ub"][0])
+    ylim=(data["lb"][2], data["ub"][2])
     level_coords = np.meshgrid(
         np.linspace(data["lb"][1],data["ub"][1],num_steps), indexing="xy"
     )[0]
@@ -62,6 +68,8 @@ else:
                     np.linspace(data["lb"][1],data["ub"][1],num_steps), indexing="xy")
     x_label = "x"
     y_label = "y"
+    xlim=(data["lb"][0], data["ub"][0])
+    ylim=(data["lb"][1], data["ub"][1])
     level_coords = np.meshgrid(
         np.linspace(data["lb"][2],data["ub"][2],num_steps), indexing="xy"
     )[0]
@@ -93,16 +101,19 @@ for i in range(0, num_steps, args.stride):
     # Z value to be mean
     # Set color to be log(variance)
     if args.axis == "x":
-        Z = test_mean[i]
-        color_dimension = np.log(test_var[i])
+        Z = test_mean[i, :, :]
+        color_dimension = test_var[i]
+        #color_dimension = np.log(test_var[i])
         normal_vec = test_normal[i]
     elif args.axis == "y":
         Z = test_mean[:,i]
-        color_dimension = np.log(test_var[:,i])
+        color_dimension = test_var[:,i]
+        #color_dimension = np.log(test_var[:,i])
         normal_vec = test_normal[:,i]
     else:
         Z = test_mean[:,:,i]
-        color_dimension = np.log(test_var[:,:,i])
+        color_dimension = test_var[:,:,i]
+        #color_dimension = np.log(test_var[:,:,i])
         normal_vec = test_normal[:,:,i]
 
 
@@ -126,10 +137,13 @@ for i in range(0, num_steps, args.stride):
     ax.zaxis.set_major_locator(LinearLocator(10))
     # # A StrMethodFormatter is used automatically
     ax.zaxis.set_major_formatter('{x:.02f}')
-    # Add a color bar which maps log(var) values to colors.
-    plt.colorbar(m, ax=ax, shrink=0.5, aspect=5, label="log(var)")
+    # Add a color bar which maps variance values to colors.
+    plt.colorbar(m, ax=ax, shrink=0.5, aspect=5, label="variance")
     # Add plane at z=0
     ax.plot_surface(X, Y, np.zeros_like(Y), alpha=0.5)
+    # Set axes bounds and labels
+    ax.set(xlim=xlim, ylim=ylim)
+    ax.axis('equal')
 
     # Plot 2: Normal field and contour
     ax2.set_title("normal field and contour")
@@ -140,8 +154,13 @@ for i in range(0, num_steps, args.stride):
                               normal_vec[::args.quiver_spacing,::args.quiver_spacing,1], 
                               normal_vec[::args.quiver_spacing,::args.quiver_spacing,2], length=0.005, normalize=True)
     ax2.contour(X, Y, Z, levels = np.linspace(-0.001, 0.001, 2),cmap="jet", alpha=0.5)
+    ax2.set_xlabel(x_label)
+    ax2.set_ylabel(y_label)
+    ax2.set_zlim(-args.isf_limit, args.isf_limit)
     if args.query_point is not None:
         ax2.scatter([q_point[0]],[q_point[1]], [q_point[2]], color="orange", s=100, zorder=10)
+    ax2.set(xlim=xlim, ylim=ylim)
+    ax2.axis('equal')
     
     # Plot 3: input point cloud
     ax3.set_title("input and predicted point clouds")
@@ -196,14 +215,10 @@ for i in range(0, num_steps, args.stride):
     ax4.set_title("mean")
     cm_bound = min(np.abs(np.max(Z)), np.abs(np.abs(np.min(Z))))
     mean_cm_norm = matplotlib.colors.Normalize(-cm_bound, cm_bound)
-    if args.axis == "x":
-        im = ax4.imshow(test_mean[i], cmap="seismic", norm=mean_cm_norm)
-    elif args.axis == "y":
-        im = ax4.imshow(test_mean[:,i], cmap="seismic", norm=mean_cm_norm)
-    else:
-        im = ax4.imshow(test_mean[:,:,i], cmap="seismic", norm=mean_cm_norm)
     ax4.set_xlabel(x_label)
     ax4.set_ylabel(y_label)
+    im = ax4.scatter(X, Y, c=Z, cmap="seismic", norm=mean_cm_norm)
+    ax4.set_aspect('equal', 'box')
     plt.colorbar(im, ax=ax4, shrink=0.5, aspect=5, label="mean")
 
     plt.show()

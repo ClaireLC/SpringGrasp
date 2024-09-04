@@ -4,9 +4,10 @@ import matplotlib.pyplot as plt
 from gpis.gpis import GPIS
 import torch
 from utils import robot_configs
-from utils.pb_grasp_visualizer import GraspVisualizer
 from utils.create_arrow import create_direct_arrow
 import os
+import wandb
+from datetime import date, datetime
 
 from spring_grasp_planner.optimizers import FCGPISGraspOptimizer, SpringGraspOptimizer
 from spring_grasp_planner.initial_guesses import WRIST_OFFSET
@@ -40,10 +41,104 @@ def vis_grasp(tip_pose, target_pose):
 
 optimizers = {"sp": SpringGraspOptimizer,
               "fc":   FCGPISGraspOptimizer}
+            
+def get_run_name(conf, with_scene_name=False):
+    today_date = date.today().strftime("%m-%d-%y")
+    timestamp = datetime.now().time().strftime("%H%M%S")
+
+    if args.npz_path is not None:
+        obj_name = os.path.basename(os.path.dirname((os.path.dirname(args.npz_path))))
+        pos_name = os.path.basename((os.path.dirname(args.npz_path)))
+        scene_name = obj_name + "_" + pos_name
+    else:
+        scene_name = args.exp_name
+
+    if with_scene_name:
+        run_name = scene_name
+    else:
+        run_name = "opt"
+
+    # Add conf params to name
+    params_to_add = [
+        "func_metric_name",
+        "w_func",
+        "func_contactgrasp_dist",
+        "func_contactgrasp_w_pos",
+        "func_contactgrasp_w_neg",
+        "func_contactgrasp_dp_thresh",
+        "func_finger_pts",
+    ]
+    
+    conf_dict = vars(conf)
+    for key in params_to_add:
+        val = conf_dict[key]
+        if isinstance(val, list):
+            val_str = "-".join([str(i) for i in val]).replace(".", "p")
+        elif type(val) == float:
+            val_str = str(val).replace(".", "p")
+        elif val is None:
+            val_str = "none"
+        else:
+            val_str = str(val)
+
+        if key in [
+            "pretrained_pointnet_dir",
+        ]:
+            if val_str.lower() != "none":
+                val_str = "true"
+
+        # abbreviate key
+        splits = key.split("_")
+        short_key = ""
+
+        for split in splits:
+            short_key += split[0]
+    
+        run_name += f"_{short_key}-{val_str}"
+
+    run_name += ("_" + today_date + "_" + timestamp)
+
+    return run_name
+
+
+def set_wandb_config(project_name, run_name, conf, wandb_entity="clairec"):
+    """
+    Set up wandb logging
+    """
+
+    wandb.require("service")
+    # Load or save wandb info
+    exp_dir = os.path.dirname(conf["npz_path"])
+    wandb_info_path = os.path.join(exp_dir, "wandb_info.json")
+
+    wandb_id = wandb.util.generate_id()
+    wandb_info = {
+        "run_name": run_name,
+        "id": wandb_id,
+        "project": project_name,
+    }
+    with open(wandb_info_path, "w") as f:
+        json.dump(wandb_info, f, indent=4)
+
+    # wandb init
+    wandb.init(
+        project=project_name,
+        entity=wandb_entity,
+        name=wandb_info["run_name"],
+        id=wandb_info["id"],
+        config=conf,
+    )
+
+
+def set_seeds():
+    np.random.seed(0)
+    torch.manual_seed(0)
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
     import json
+
+    set_seeds()
 
     parser = ArgumentParser()
     parser.add_argument("--num_iters", type=int, default=200)
@@ -55,30 +150,101 @@ if __name__ == "__main__":
     parser.add_argument("--friction", type=float, default=1.0)
     parser.add_argument("--vis_gpis", action="store_true", default=False)
     parser.add_argument("--weight_config", type=str, default=None)
+
     parser.add_argument("--npz_path", type=str, help="Path to input .npz file with points")
     parser.add_argument("--vis", choices=["pb", "o3d"], help="Visualize mode. If not specified, do not show vis.")
     parser.add_argument("--vis_ic", action="store_true", help="Visualize initial conditions")
+    parser.add_argument("--log", "-l", action="store_true", help="Log optimization to wandb")
+
+    # Weights for loss terms - original SpringGrasp
+    parser.add_argument("--w_sp", type=float, default=200, help="Weight for SpringGrasp cost")
+    parser.add_argument("--w_dist", type=float, default=10000, help="Weight for contact pos distance")
+    parser.add_argument("--w_uncer", type=float, default=20, help="Weight for uncertainty")
+    parser.add_argument("--w_gain", type=float, default=0.5, help="Weight for regularizing gains")
+    parser.add_argument("--w_tar", type=float, default=1000, help="Weight for target pos distance")
+    parser.add_argument("--w_col", type=float, default=1.0, help="Weight for penalizing collisions")
+    parser.add_argument("--w_reg", type=float, default=10.0, help="Weight for regularizing joint angles and fingertip postions")
+    parser.add_argument("--w_force", type=float, default=200.0, help="Weight for regularizing contact forces")
+    parser.add_argument("--w_pre_dist", type=float, default=50.0, help="Weight for pre-grasp finertip pos")
+    parser.add_argument("--w_palm_dist", type=float, default=1.0, help="Weight for palm to obj distance")
+
+    # Functional grasp params
+    parser.add_argument("--w_func", type=float, default=0.0, help="Weight for functional grasp term")
+    parser.add_argument("--func_metric_name", type=str, choices=["contactgrasp"], help="Name of functional grasp metric to use")
+    parser.add_argument("--func_contactgrasp_dist", type=str, choices=["gpis", "euclidean"], default="euclidean")
+    parser.add_argument("--func_contactgrasp_w_pos", type=float, default=1.0, help="Weight for positive points")
+    parser.add_argument("--func_contactgrasp_w_neg", type=float, default=1.0, help="Weight for negative points")
+    parser.add_argument("--func_contactgrasp_dp_thresh", type=float, default=0.9)
+    parser.add_argument("--func_finger_pts", type=str, default="pregrasp", choices=["pregrasp", "contact", "target"], help="Finger points to use")
+
+
     args = parser.parse_args()
 
     if args.weight_config is not None:
         weight_config = json.load(open(f"weight_config/{args.weight_config}.json"))
     else:
-        weight_config = None
+        # Use default weights
+        weight_config = {
+            "w_sp": args.w_sp,
+            "w_dist": args.w_dist,
+            "w_tar": args.w_tar,
+            "w_uncer": args.w_uncer,
+            "w_gain": args.w_gain,
+            "w_col": args.w_col,
+            "w_reg": args.w_reg,
+            "w_force": args.w_force,
+            "w_pre_dist": args.w_pre_dist,
+            "w_palm_dist": args.w_palm_dist,
+            "w_func": args.w_func,
+        }
+    
+    # Create run directory to log optimization results
+    run_dir_name = get_run_name(args)
+    if args.npz_path is not None:
+        run_dir = os.path.join(os.path.dirname(args.npz_path), run_dir_name)
+    elif args.pcd_file is not None:
+        run_dir = os.path.dirname(args.pcd_file)
+    else:
+        run_dir = "output"
+    if not os.path.exists(run_dir): os.makedirs(run_dir)
+
+    # Set up wandb logging
+    if args.log and args.npz_path is not None:
+        run_name = get_run_name(args, with_scene_name=True)
+        args_dict = vars(args)
+        args_dict["run_dir"] = run_dir # Save run_dir to wandb log
+        set_wandb_config("springgrasp", run_name, args_dict)
+    
+        # Save args_dict to run_dir
+        conf_path = os.path.join(run_dir, "conf.json")
+        with open(conf_path, "w") as f:
+            json.dump(args_dict, f, indent=4)
 
     if args.pcd_file is not None:
         pcd = o3d.io.read_point_cloud(args.pcd_file)
         center = pcd.get_axis_aligned_bounding_box().get_center()
-        WRIST_OFFSET[:,0] += center[0]
-        WRIST_OFFSET[:,1] += center[1]
-        WRIST_OFFSET[:,2] += 2 * center[2]
-        init_wrist_poses = WRIST_OFFSET
+        #WRIST_OFFSET[:,0] += center[0]
+        #WRIST_OFFSET[:,1] += center[1]
+        #WRIST_OFFSET[:,2] += center[2]
+        #init_wrist_poses = WRIST_OFFSET
+        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
+        input_pts = None
+        aff_labels = None
+        input_path = args.pcd_file
     elif args.npz_path is not None:
         input_dict = np.load(args.npz_path, allow_pickle=True)["data"].item() 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(input_dict["pts_wf"])
         #init_wrist_poses = init_cond.get_default_wrist_pose(pcd)
-        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd)
+        init_wrist_poses = init_cond.get_init_wrist_pose_from_pcd(pcd, viz=args.vis_ic, check_palm_ori=True)
         center = pcd.get_axis_aligned_bounding_box().get_center()
+        
+        input_pts = torch.tensor(input_dict["pts_wf"]).to(device).double()
+        if "aff_labels" in input_dict:
+            aff_labels = torch.tensor(input_dict["aff_labels"]).to(device).double()
+        else:
+            aff_labels = None
+        input_path = args.npz_path
     else:
         pcd = o3d.io.read_point_cloud("data/obj_cropped.ply")
         center = pcd.get_axis_aligned_bounding_box().get_center()
@@ -86,11 +252,18 @@ if __name__ == "__main__":
         WRIST_OFFSET[:,1] += center[1]
         WRIST_OFFSET[:,2] += 2 * center[2]
         init_wrist_poses = WRIST_OFFSET
+        input_pts = None
+        aff_labels = None
+        input_path = None
     
     # GPIS formulation - load or fit
-    gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
+    # TODO if using cuda, need to compute GPIS with cuda
+    if args.npz_path is not None:
+        gpis_save_path = os.path.join(os.path.dirname(args.npz_path), "gpis.pt")
+    else:
+        gpis_save_path = None
     bound = max(max(pcd.get_axis_aligned_bounding_box().get_extent()) / 2 + 0.01, 0.1) # minimum bound is 0.1
-    if os.path.exists(gpis_save_path):
+    if gpis_save_path is not None and os.path.exists(gpis_save_path):
         # Load
         print("Loading GPIS from", gpis_save_path)
         gpis = torch.load(gpis_save_path)
@@ -127,8 +300,9 @@ if __name__ == "__main__":
                     noise = torch.tensor([0.2] * len(externel_points)+
                                         data_noise +
                                         [0.05] * len(internal_points)).double().to(device))
-        torch.save(gpis, gpis_save_path)
-        print("Saved GPIS to", gpis_save_path)
+        if gpis_save_path is not None:
+            torch.save(gpis, gpis_save_path)
+            print("Saved GPIS to", gpis_save_path)
     if args.vis_gpis:
         print("Visualizing GPIS...")
         test_mean, test_var, test_normal, lb, ub = gpis.get_visualization_data([-bound+center[0],-bound+center[1],-bound+center[2]],
@@ -166,12 +340,13 @@ if __name__ == "__main__":
                 "bound": bound,
                 "center": center,
             }
-            save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.npz")
-            print("Saving GPIS results to:", save_path)
-            np.savez_compressed(save_path, data=gpis_dict)
-            save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.ply")
-            print("Saving GPIS viz pcd to:", save_path)
-            o3d.io.write_point_cloud(save_path, fitted_pcd)  
+            if args.npz_path is not None:
+                save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.npz")
+                print("Saving GPIS results to:", save_path)
+                np.savez_compressed(save_path, data=gpis_dict)
+                save_path = os.path.join(os.path.dirname(args.npz_path), "sg_gpis.ply")
+                print("Saving GPIS viz pcd to:", save_path)
+                o3d.io.write_point_cloud(save_path, fitted_pcd)  
         quit()
 
     init_tip_pose = torch.tensor([[[0.05,0.05, 0.02],[0.06,-0.0, -0.01],[0.03,-0.04,0.0],[-0.07,-0.01, 0.02]]]).double().to(device)
@@ -224,7 +399,8 @@ if __name__ == "__main__":
             mass=args.mass,
             com=center[:3],
             gravity=False,
-            weight_config=weight_config
+            weight_config=weight_config,
+            conf=args,
         )
 
     # Get intial conditions
@@ -246,7 +422,7 @@ if __name__ == "__main__":
             "compliance": compliance.cpu().detach().numpy(),
             "joint_angles": init_joint_angles.cpu().detach().numpy(),
         }
-        save_path = os.path.join(os.path.dirname(args.npz_path), "sg_init_cond.npz")
+        save_path = os.path.join(run_dir, "sg_init_cond.npz")
         print("Saving initial conditions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
     if args.vis_ic:
@@ -264,7 +440,16 @@ if __name__ == "__main__":
 
     # Run optimization
     if args.mode == "sp":
-        opt_joint_angles, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_R, opt_t = grasp_optimizer.optimize(init_joint_angles,target_pose, compliance, friction_mu, gpis, verbose=True)
+        opt_joint_angles, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_R, opt_t = grasp_optimizer.optimize(
+            init_joint_angles,
+            target_pose,
+            compliance,
+            friction_mu,
+            gpis,
+            pts=input_pts,
+            aff_labels=aff_labels,
+            verbose=True,
+        )
         opt_tip_pose = grasp_optimizer.forward_kinematics(opt_joint_angles, opt_palm_pose)
     elif args.mode == "fc":
         opt_tip_pose, opt_compliance, opt_target_pose, opt_palm_pose, opt_margin, opt_joint_angles = grasp_optimizer.optimize(init_joint_angles, target_pose, compliance, friction_mu, gpis, verbose=True)
@@ -298,14 +483,15 @@ if __name__ == "__main__":
             "input_pts": np.asarray(pcd.points),
             "opt_t": opt_t.cpu().detach().numpy(),
             "opt_R": opt_R.cpu().detach().numpy(),
-            "input_path": args.npz_path,
+            "input_path": input_path,
         }
-        save_path = os.path.join(os.path.dirname(args.npz_path), "sg_predictions.npz")
+        save_path = os.path.join(run_dir, "sg_predictions.npz")
         print("Saving predictions to:", save_path)
         np.savez_compressed(save_path, data=data_dict)
 
     if args.vis is not None:
         if args.vis == "pb":
+            from utils.pb_grasp_visualizer import GraspVisualizer
             # Visualize grasp in pybullet
             pcd.colors = o3d.utility.Vector3dVector(np.array([0.0, 0.0, 1.0] * len(pcd.points)).reshape(-1,3))
             grasp_vis = GraspVisualizer(robot_urdf, pcd)

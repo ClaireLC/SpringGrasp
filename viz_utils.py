@@ -156,9 +156,24 @@ def main(args):
         feasible_idx = grasp_dict["feasible_idx"]
     else:
         feasible_idx = None
+    
+    if args.id is not None:
+        ids_to_viz = [args.id]
+    else:
+        # If saving, save all grasps, otherwise only view feasible grasps
+        if not args.save:
+            if feasible_idx is not None:
+                ids_to_viz = feasible_idx[0]
+            else:
+                ids_to_viz = []
+                print("No feasible grasps to visualize. Exiting")
+                quit()
+        else:
+            ids_to_viz = list(range(grasp_dict["palm_pose"].shape[0]))
 
     # Iterate through grasps in grasp_path.npz
-    for grasp_i in tqdm(range(grasp_dict["palm_pose"].shape[0])):
+    for grasp_i in tqdm(ids_to_viz):
+
         pts = grasp_dict["input_pts"]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts)
@@ -192,6 +207,7 @@ if __name__ == "__main__":
         type=str,
         help="Path to .npz file with grasp optimization results",
     )
+    parser.add_argument("--id", "-i", type=int, help="Grasp ID to visualize")
     parser.add_argument("--save", "-s", action="store_true")
     args = parser.parse_args()
     main(args)
