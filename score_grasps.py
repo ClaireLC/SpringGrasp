@@ -89,9 +89,8 @@ def main(args):
     sorted_idxs = np.argsort(cost)
     sorted_cost = np.take_along_axis(cost, sorted_idxs, axis=0)
     sorted_ids = np.take_along_axis(grasps_to_eval, sorted_idxs, axis=0)
-    print(sorted_ids)
-    print(sorted_cost)
-    quit()
+    print("Sorted IDs:", sorted_ids)
+    print("Cost:", sorted_cost)
 
 
 if __name__ == "__main__":
