@@ -62,6 +62,8 @@ def validate_interesect_points(intersection_points, pcd, threshold=0.004):
 
     return valid_points
 
+
+
 def pcd_to_grasp_intersection(arrow_start, arrow_end, pcd):
     """ Version 1
     # Estimate normals for the point cloud
