@@ -5,31 +5,32 @@ import open3d as o3d
 from utils.create_arrow import create_direct_arrow
 
 
-def contactgrasp_metric(
-    gpis,
-    pts,
-    ftip_pos,
-    aff_labels,
-    w_pos=1.0,
-    w_neg=1.0,
-    dp_thresh=None,
-    dist_to_use="gpis",
-    debug=False,
-):
+def contactgrasp_metric(gpis,
+                        pts,
+                        ftip_pos,
+                        aff_labels,
+                        w_pos=1.0,
+                        w_neg=1.0,
+                        dp_thresh=None,
+                        dist_to_use="gpis",
+                        debug=None,):
     """
-    Score grasps based on metric used in ContactGrasp paper
+    Score grasps based on metric used in ContactGrasp paper.
 
     args:
-    gpis: Saved GPIS() fitted to data
-    pts: input point clouds (Tensor [batch_size, npoint, 3])
-    ftip_pos: fingertip positions (Tensor [batch_size, 4, 3])
-    aff_labels: per-point affordance labels (Tensor [batch_size, npoint])
-    w_pos: weight for positive points (aff_label == 1)
-    w_neg: weight for negative points (aff_label != 1)
-    dp_thresh: threshold for checking dot product between ft_pos normal and pt normal
-    dist_to_use: distance to use for computing cost ["gpis", "euclidean"]
-    debug: if True, show debug visualizations in o3d
+    - gpis: Saved GPIS() fitted to data
+    - pts: input point clouds (Tensor [batch_size, npoint, 3])
+    - ftip_pos: fingertip positions (Tensor [batch_size, 4, 3])
+    - aff_labels: per-point affordance labels (Tensor [batch_size, npoint])
+    - w_pos: weight for positive points (aff_label == 1)
+    - w_neg: weight for negative points (aff_label != 1)
+    - dp_thresh: threshold for checking dot product between ft_pos normal and pt normal
+    - dist_to_use: distance to use for computing cost ["gpis", "euclidean"]
+    - debug: if True, show debug visualizations in o3d
     """
+
+    if debug is None:
+        debug = False
 
     # Check that inputs are batched (have one extra dimension)
     assert pts.ndim == 3
@@ -37,54 +38,54 @@ def contactgrasp_metric(
     assert aff_labels.ndim == 2
 
     batch_size = pts.shape[0] # B
-    npoint = pts.shape[1]
+    npoint = pts.shape[1] # N
 
     # Get distances from each point to each finger
     pt_to_finger_dists = torch.cdist(pts, ftip_pos) # [B, npoint, 4]
 
+    # Get distance between fingertip and nearest point on surface (SDF) 
     ft_dists, ft_vars = gpis.pred(ftip_pos) # [B, 4]
 
-    # Get SDF gradients at all points and fingertip positions
+    # Get normals at the fingertip positions and surface points
     ftip_normals = gpis.compute_normal(ftip_pos) # [B, 4, 3]
     pt_normals = gpis.compute_normal(pts) # [B, npoint, 3]
 
+    # Initialize cost to 0 for each batch (feasible grasp)
     cost = torch.zeros(batch_size) # [B,]
+
+    # Iterate over each surface point
     for i in range(npoint):
+        # Check if affordance mask or not
         label_i = aff_labels[:, i] # [B]
 
         # Closest fingertip id to point i
-        f_i = torch.argmin(pt_to_finger_dists[:, i], dim=1) # [B] indices of closest finger for each item in batch
+        f_i = torch.argmin(pt_to_finger_dists[:, i], dim=1)
 
-        # Test batching
-        #for b in range(batch_size):
-        #    print(ftip_pos[b, f_i[b]])
+        # Get position of the closest fingertip for each batch
         closest_ftip_pos = ftip_pos[torch.arange(batch_size), f_i] # [B, 3]
 
-        if dist_to_use == "gpis":
-            # This is what ContactGrasp did
-            #for b in range(batch_size):
-            #    print(ft_dists[b][f_i[b]]) # SDF value of closest fingertip to point (used in ContactGrasp)
+        if dist_to_use == "gpis": # SDF (e.g. ContactGrasp)
             dist = ft_dists[torch.arange(batch_size), f_i] # [B]
-        elif dist_to_use == "euclidean":
-            #for b in range(batch_size):
-            #    print(pt_to_finger_dists[b][i, f_i]) # Distance of closest fingertip to current point
+        elif dist_to_use == "euclidean": # Euclidean
             dist = pt_to_finger_dists[torch.arange(batch_size), i, f_i] # [B]
         else:
             raise ValueError
 
+        # Normal vector from finger tip
         ftip_normal = ftip_normals[torch.arange(batch_size), f_i] # [B, 3]
-        pt_normal = pt_normals[torch.arange(batch_size), i] # [B, 3]
         
-        # Take row-wise dot product, batched
-        #for b in range(batch_size):
-        #    print(np.dot(ftip_normals[b][f_i[b]], pt_normals[b][i]))
-        normal_dp = torch.einsum('ij,ij->i', ftip_normal, pt_normal) # [B]
+        # Normal vector from surface point
+        pt_normal = pt_normals[torch.arange(batch_size), i] # [B, 3]
+
+        # Cosine similarity
+        normal_dp = torch.einsum('ij, ij->i', ftip_normal, pt_normal) # [B]
 
         # Handle positive and negative points
         pos_mask = label_i == 1
-        neg_mask = ~pos_mask  # Not positive is negative
+        neg_mask = ~pos_mask
 
-        cost_i = torch.zeros(batch_size).double()  # Initialize costs
+        # Initialize costs
+        cost_i = torch.zeros(batch_size).double()
 
         # Costs for positive points
         cost_i[pos_mask] = w_pos * dist[pos_mask]**2
@@ -92,30 +93,17 @@ def contactgrasp_metric(
         # Costs for negative points
         if dp_thresh is not None:
             valid_neg_mask = torch.abs(normal_dp) >= dp_thresh
+
             # Only for negative points where the condition is met
             valid_neg_mask &= neg_mask
             cost_i[valid_neg_mask] = -1 * w_neg * dist[valid_neg_mask]**2
         else:
             cost_i[neg_mask] = -1 * w_neg * dist[neg_mask]**2
-        #if label_i == 1:
-        #    # Positive point
-        #    cost_i = w_pos * dist.item()**2
-        #else:
-        #    # Negative point
-        #    if dp_thresh is not None:
-        #        if abs(normal_dp) >= dp_thresh:
-        #            cost_i = -1 * w_neg * dist.item()**2
-        #        else: 
-        #            cost_i = 0
-        #    else:
-        #        cost_i = -1 * w_neg * dist.item()**2
-        #print(cost_i.shape)
-        #quit()
 
         cost += cost_i
 
         # Visualize
-        if debug and i % 100 == 0:
+        if debug:
             GRASPS_TO_VIZ = list(range(batch_size))
             for g_i in GRASPS_TO_VIZ:
                 print(f"Grasp {g_i} point {i}")
